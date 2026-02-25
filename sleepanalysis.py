@@ -348,6 +348,79 @@ if __name__ == "__main__":
             else:
                 row[f"City {city}"] = 0
 
+    # =========================
+    # ALARM TIME NONPARAMETRIC MODEL
+    # =========================
+
+    DAY_SECONDS = 86400
+    BANDWIDTH = 45 * 60  # minutes smoothing window (edit from around 30 to 90 minutes)
+
+    # helper: circular distance in seconds
+    def circ_dist(a, b):
+        d = abs(a - b)
+        return min(d, DAY_SECONDS - d)
+
+    # collect data for rows WITH alarm and known sleep quality
+    alarm_times = []
+    alarm_quality = []
+    alarm_weights = []
+
+    for r in rows:
+        t = r["Wake up window stop"]
+        q = r["Sleep Quality"]
+        w = r["Weight"]
+        if t is not None and q is not None:
+            alarm_times.append(t)
+            alarm_quality.append(q)
+            alarm_weights.append(w)
+
+    alarm_times = np.array(alarm_times, dtype=float)
+    alarm_quality = np.array(alarm_quality, dtype=float)
+    alarm_weights = np.array(alarm_weights, dtype=float)
+
+    # kernel prediction function
+    def predict_alarm_quality(t_query, exclude_index=None):
+        dists = np.array([circ_dist(t_query, t) for t in alarm_times])
+        kernel = np.exp(-0.5 * (dists / BANDWIDTH) ** 2)
+
+        w = kernel * alarm_weights
+
+        if exclude_index is not None:
+            w[exclude_index] = 0
+
+        if w.sum() == 0:
+            return None
+
+        return np.sum(w * alarm_quality) / np.sum(w)
+
+    # mean quality when NO alarm
+    no_alarm_vals = [
+        r["Sleep Quality"] * r["Weight"]
+        for r in rows
+        if r["Wake up window stop"] is None and r["Sleep Quality"] is not None
+    ]
+    no_alarm_w = [
+        r["Weight"]
+        for r in rows
+        if r["Wake up window stop"] is None and r["Sleep Quality"] is not None
+    ]
+
+    if len(no_alarm_vals) > 0:
+        no_alarm_mean = sum(no_alarm_vals) / sum(no_alarm_w)
+    else:
+        no_alarm_mean = np.mean(alarm_quality)  # fallback
+
+    # assign columns
+    for i, r in enumerate(rows):
+        t = r["Wake up window stop"]
+
+        if t is None:
+            r["Alarm set"] = 0
+            r["Alarm_quality_prediction"] = no_alarm_mean
+        else:
+            r["Alarm set"] = 1
+            r["Alarm_quality_prediction"] = predict_alarm_quality(t)
+
     factor_list = (
         [
             "Went to bed",
@@ -376,15 +449,8 @@ if __name__ == "__main__":
     # correlation calculation
 
     control_columns = [
-        "Went to bed",
-        "Time in bed (seconds)",
-        "Regularity",
-        "Steps",
-        "Weather temperature (°C)",
-        "Air Pressure (Pa)",
-        "Ambient noise (dB)",
-        "Ambient light (lux)",
-        "Wake up window stop",
+        "Alarm_quality_prediction",
+        "Alarm set",
     ]
 
     correlation_results_notes = {}
@@ -526,3 +592,24 @@ if __name__ == "__main__":
 
     for key, value in expected_effects_cities:
         print(f"{key} -> {int(value.round()):+} %")
+
+    import matplotlib.pyplot as plt
+
+    # grid over 24h
+    grid = np.linspace(0, DAY_SECONDS, 300)
+    preds = [predict_alarm_quality(t) for t in grid]
+
+    # convert seconds → hours for nicer axis
+    grid_hours = grid / 3600
+
+    plt.figure()
+    plt.plot(grid_hours, preds)
+
+    # scatter actual weighted points (optional but useful)
+    actual_hours = alarm_times / 3600
+    plt.scatter(actual_hours, alarm_quality)
+
+    plt.xlabel("Alarm time (hours)")
+    plt.ylabel("Expected sleep quality")
+    plt.title("Weighted alarm-time effect")
+    plt.show()
