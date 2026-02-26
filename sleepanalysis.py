@@ -611,6 +611,8 @@ if __name__ == "__main__":
     plt.xlabel("Alarm time (hours)")
     plt.ylabel("Expected sleep quality")
     plt.title("Weighted alarm-time effect")
+    plt.xticks(np.arange(0, 25, 2))
+    plt.grid(True)
     plt.show()
 
     # boxplot for alarm vs no alarm
