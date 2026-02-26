@@ -599,17 +599,27 @@ if __name__ == "__main__":
     grid = np.linspace(0, DAY_SECONDS, 300)
     preds = [predict_alarm_quality(t) for t in grid]
 
-    # convert seconds → hours for nicer axis
     grid_hours = grid / 3600
 
     plt.figure()
     plt.plot(grid_hours, preds)
 
-    # scatter actual weighted points (optional but useful)
+    # scatter actual weighted points
     actual_hours = alarm_times / 3600
     plt.scatter(actual_hours, alarm_quality)
 
     plt.xlabel("Alarm time (hours)")
     plt.ylabel("Expected sleep quality")
     plt.title("Weighted alarm-time effect")
+    plt.show()
+
+    # boxplot for alarm vs no alarm
+    plt.figure()
+    data = [
+        [r["Sleep Quality"] for r in rows if r["Alarm set"] == 0],
+        [r["Sleep Quality"] for r in rows if r["Alarm set"] == 1],
+    ]
+    plt.boxplot(data, tick_labels=["No alarm", "Alarm set"])
+    plt.ylabel("Sleep quality")
+    plt.title("Sleep quality vs alarm set")
     plt.show()
