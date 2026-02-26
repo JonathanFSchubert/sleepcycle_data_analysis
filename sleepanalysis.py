@@ -310,9 +310,6 @@ if __name__ == "__main__":
             if row[column] == "":
                 row[column] = None
 
-    """
-    In actual code for sleepcycle use known unique types
-    """
     # find all unique weather types
     unique_weather_types = sorted(
         {row["Weather type"] for row in rows if row["Weather type"] != None}
