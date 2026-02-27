@@ -140,7 +140,7 @@ def boxplot(groups, labels, ylabel, title, invert_x=False):
 
 
 # =========================
-# Time-decay weights (same logic as main project)
+# Time-decay weights
 # =========================
 
 latest_date = max(r["Woke up"] for r in rows if r["Woke up"] is not None)
@@ -160,13 +160,13 @@ for r in rows:
 # Sleep drug note vs Asleep after
 # =========================
 
-drug_yes = [r["Asleep after (seconds)"] for r in rows if r["Sleep drug"] == 1]
-drug_no = [r["Asleep after (seconds)"] for r in rows if r["Sleep drug"] == 0]
+drug_yes = [r["Asleep after (seconds)"] / 60 for r in rows if r["Sleep drug"] == 1]
+drug_no = [r["Asleep after (seconds)"] / 60 for r in rows if r["Sleep drug"] == 0]
 
 boxplot(
     [drug_no, drug_yes],
     ["No sleep drug", "Sleep drug"],
-    "Asleep after (s)",
+    "Asleep after (minutes)",
     "Sleep drug vs time to fall asleep",
 )
 
@@ -210,13 +210,13 @@ scatter(
 # Coffee note vs Asleep after
 # =========================
 
-coffee_yes = [r["Asleep after (seconds)"] for r in rows if r["Coffee"] == 1]
-coffee_no = [r["Asleep after (seconds)"] for r in rows if r["Coffee"] == 0]
+coffee_yes = [r["Asleep after (seconds)"] / 60 for r in rows if r["Coffee"] == 1]
+coffee_no = [r["Asleep after (seconds)"] / 60 for r in rows if r["Coffee"] == 0]
 
 boxplot(
     [coffee_no, coffee_yes],
     ["No coffee", "Coffee"],
-    "Asleep after (s)",
+    "Asleep after (minutes)",
     "Coffee vs time to fall asleep",
 )
 
@@ -224,12 +224,12 @@ boxplot(
 # Tea note vs Asleep after
 # =========================
 
-tea_yes = [r["Asleep after (seconds)"] for r in rows if r["Tea"] == 1]
-tea_no = [r["Asleep after (seconds)"] for r in rows if r["Tea"] == 0]
+tea_yes = [r["Asleep after (seconds)"] / 60 for r in rows if r["Tea"] == 1]
+tea_no = [r["Asleep after (seconds)"] / 60 for r in rows if r["Tea"] == 0]
 boxplot(
     [tea_no, tea_yes],
     ["No tea", "Tea"],
-    "Asleep after (s)",
+    "Asleep after (minutes)",
     "Tea vs time to fall asleep",
 )
 
