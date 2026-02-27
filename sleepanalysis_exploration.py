@@ -1,4 +1,7 @@
-import io
+"""
+Parts of this code were written with help from LLMs.
+"""
+
 import math
 from datetime import datetime, timedelta
 import numpy as np
