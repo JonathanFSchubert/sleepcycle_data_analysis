@@ -233,7 +233,7 @@ if __name__ == "__main__":
     for row in rows:
         row["Age (days)"] = (latest_date - row["Woke up"]).days
 
-    HALF_LIFE_DAYS = 365
+    HALF_LIFE_DAYS = 365  # probably 365 is ok
     LAMBDA = math.log(2) / HALF_LIFE_DAYS
 
     for row in rows:
@@ -607,7 +607,12 @@ if __name__ == "__main__":
 
     # scatter actual weighted points
     actual_hours = alarm_times / 3600
-    plt.scatter(actual_hours, alarm_quality)
+    plt.scatter(
+        actual_hours,
+        alarm_quality,
+        s=70 * (alarm_weights / alarm_weights.max()),
+        alpha=0.6,
+    )
 
     plt.xlabel("Alarm time (hours)")
     plt.ylabel("Expected sleep quality")
