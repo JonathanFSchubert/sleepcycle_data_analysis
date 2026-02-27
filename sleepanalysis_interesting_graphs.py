@@ -1,3 +1,7 @@
+"""
+Parts of this code were written with help from LLMs.
+"""
+
 import csv
 from datetime import datetime, timedelta
 import numpy as np
@@ -71,6 +75,7 @@ for i in range(len(rows)):
 for r in rows:
     r["Sleep drug"] = 1 if "Sleep drug" in r["Notes"] else 0
     r["Coffee"] = 1 if "Coffee" in r["Notes"] else 0
+    r["Tea"] = 1 if "Tea" in r["Notes"] else 0
 
 # =========================
 # Plot helper
@@ -175,6 +180,19 @@ boxplot(
     ["No coffee", "Coffee"],
     "Asleep after (s)",
     "Coffee vs time to fall asleep",
+)
+
+# =========================
+# Tea note vs Asleep after
+# =========================
+
+tea_yes = [r["Asleep after (seconds)"] for r in rows if r["Tea"] == 1]
+tea_no = [r["Asleep after (seconds)"] for r in rows if r["Tea"] == 0]
+boxplot(
+    [tea_no, tea_yes],
+    ["No tea", "Tea"],
+    "Asleep after (s)",
+    "Tea vs time to fall asleep",
 )
 
 # =========================
