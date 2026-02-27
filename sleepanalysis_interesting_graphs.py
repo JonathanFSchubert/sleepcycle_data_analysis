@@ -27,6 +27,25 @@ def parse_float(s):
 
 
 # =========================
+# Kernel smoothing (Air pressure -> Sleep quality)
+# =========================
+
+BANDWIDTH_PRESSURE = 0.35  # edit from around 0.15 to 1; 0.25 looks similar to how to app shows it currently
+
+
+def kernel_predict_pressure(x_query, x_vals, y_vals, weights):
+    dists = np.abs(x_vals - x_query)
+    kernel = np.exp(-0.5 * (dists / BANDWIDTH_PRESSURE) ** 2)
+
+    w = kernel * weights
+
+    if w.sum() == 0:
+        return None
+
+    return np.sum(w * y_vals) / np.sum(w)
+
+
+# =========================
 # Load data
 # =========================
 
@@ -59,6 +78,8 @@ for r in rows:
     r["Notes"] = [] if r["Notes"] == "" else r["Notes"].split(":")
 
     r["Regularity"] = parse_float(r["Regularity"])
+
+    r["Air Pressure (Pa)"] = parse_float(r["Air Pressure (Pa)"])
 
 # =========================
 # Derived columns
@@ -116,6 +137,23 @@ def boxplot(groups, labels, ylabel, title, invert_x=False):
     if invert_x:
         plt.gca().invert_xaxis()
     plt.show()
+
+
+# =========================
+# Time-decay weights (same logic as main project)
+# =========================
+
+latest_date = max(r["Woke up"] for r in rows if r["Woke up"] is not None)
+
+HALF_LIFE_DAYS = 365
+LAMBDA = np.log(2) / HALF_LIFE_DAYS
+
+for r in rows:
+    if r["Woke up"] is None:
+        r["Weight"] = None
+    else:
+        age_days = (latest_date - r["Woke up"]).days
+        r["Weight"] = np.exp(-LAMBDA * age_days)
 
 
 # =========================
@@ -220,3 +258,55 @@ scatter(
     "Sleep regularity vs Sleep quality",
     invert_x=False,
 )
+
+
+# =========================
+# Air pressure vs Sleep quality
+# =========================
+
+
+pressure = np.array(
+    [
+        r["Air Pressure (Pa)"]
+        for r in rows
+        if r["Air Pressure (Pa)"] is not None
+        and r["Sleep Quality"] is not None
+        and r["Weight"] is not None
+    ],
+    dtype=float,
+)
+
+quality = np.array(
+    [
+        r["Sleep Quality"]
+        for r in rows
+        if r["Air Pressure (Pa)"] is not None
+        and r["Sleep Quality"] is not None
+        and r["Weight"] is not None
+    ],
+    dtype=float,
+)
+
+weights = np.array(
+    [
+        r["Weight"]
+        for r in rows
+        if r["Air Pressure (Pa)"] is not None
+        and r["Sleep Quality"] is not None
+        and r["Weight"] is not None
+    ],
+    dtype=float,
+)
+
+if len(pressure) > 0:
+    grid = np.linspace(pressure.min(), pressure.max(), 300)
+    preds = [kernel_predict_pressure(x, pressure, quality, weights) for x in grid]
+
+plt.figure(figsize=(FIG_SIZE, FIG_SIZE))
+plt.scatter(pressure, quality, s=70 * (weights / weights.max()), alpha=0.6)
+plt.plot(grid, preds)
+
+plt.xlabel("Air pressure (Pa)")
+plt.ylabel("Expected sleep quality")
+plt.title("Weighted air-pressure effect (kernel smoothing)")
+plt.show()
