@@ -21,6 +21,18 @@ BANDWIDTH_DEFAULT = 0.2
 BANDWIDTH_PRESSURE = 0.35
 BANDWIDTH_ALARM = 45 * 60
 
+# Tunable parameters for reliability and shrinkage
+RELIABILITY_DENOM = 10.0  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
+GLOBAL_BIAS_DEFAULT = 0.05  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
+BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
+
+# Optional fixed sleep goal parameters (set to None to optimize, or provide a specific value/range)
+# For bedtime/alarm: time string like "22:30" (fixed) or "22:00 - 23:00" (range) or seconds (0-86400)
+# For time_in_bed: float hours like 8.0 (fixed) or "7.5 - 9.0" (range as string with hours)
+FIXED_BEDTIME = None           # e.g., "22:30" or "22:00 - 23:30" or 81000 (seconds) -> None to optimize
+FIXED_ALARM_TIME = None        # e.g., "07:00" or "07:00 - 09:00" or 25200 (seconds) -> None to optimize
+FIXED_TIME_IN_BED_HOURS = None # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
+
 
 def yyyy_time_to_datetime(string):
     if string == "":
@@ -38,6 +50,90 @@ def seconds_since_midnight(dt):
     if dt is None:
         return None
     return dt.hour * 3600 + dt.minute * 60 + dt.second
+
+
+def parse_time_to_seconds(time_input):
+    """Convert time input (string like '22:30' or int seconds) to seconds since midnight."""
+    if time_input is None:
+        return None
+    if isinstance(time_input, (int, float)):
+        return int(time_input)
+    if isinstance(time_input, str):
+        parts = time_input.split(":")
+        if len(parts) == 2:
+            hours, minutes = int(parts[0]), int(parts[1])
+            return hours * 3600 + minutes * 60
+    return None
+
+
+def parse_time_range(time_input):
+    """
+    Parse time range input.
+    Returns: (min_seconds, max_seconds) if range, or (seconds, seconds) if single value, or (None, None) if None.
+    Examples:
+    - "09:00" -> (32400, 32400)
+    - "09:00 - 10:00" -> (32400, 36000)
+    - None -> (None, None)
+    """
+    if time_input is None:
+        return None, None
+    
+    if isinstance(time_input, (int, float)):
+        return int(time_input), int(time_input)
+    
+    if isinstance(time_input, str):
+        # Check if it's a range (contains " - ")
+        if " - " in time_input:
+            parts = time_input.split(" - ")
+            if len(parts) == 2:
+                start_sec = parse_time_to_seconds(parts[0].strip())
+                end_sec = parse_time_to_seconds(parts[1].strip())
+                if start_sec is not None and end_sec is not None:
+                    return start_sec, end_sec
+        else:
+            # Single value
+            sec = parse_time_to_seconds(time_input.strip())
+            if sec is not None:
+                return sec, sec
+    
+    return None, None
+
+
+def parse_tib_range(tib_input):
+    """
+    Parse time-in-bed range input.
+    Returns: (min_hours, max_hours) if range, or (hours, hours) if single value, or (None, None) if None.
+    Examples:
+    - 8.0 -> (8.0, 8.0)
+    - "7.5 - 9.0" -> (7.5, 9.0)
+    - None -> (None, None)
+    """
+    if tib_input is None:
+        return None, None
+    
+    if isinstance(tib_input, (int, float)):
+        return float(tib_input), float(tib_input)
+    
+    if isinstance(tib_input, str):
+        # Check if it's a range (contains " - ")
+        if " - " in tib_input:
+            parts = tib_input.split(" - ")
+            if len(parts) == 2:
+                try:
+                    start = float(parts[0].strip())
+                    end = float(parts[1].strip())
+                    return start, end
+                except ValueError:
+                    pass
+        else:
+            # Single value
+            try:
+                val = float(tib_input.strip())
+                return val, val
+            except ValueError:
+                pass
+    
+    return None, None
 
 
 def parse_float(s):
@@ -243,11 +339,140 @@ def kernel_predict_circular(x_query, x_vals, y_vals, weights, bandwidth, period=
     return np.sum(w * y_vals) / np.sum(w)
 
 
+def kernel_reliability(x_query, x_vals, weights, bandwidth, circular=False, period=86400):
+    x_vals = np.asarray(x_vals, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    mask = np.isfinite(x_vals) & np.isfinite(weights) & (weights > 0)
+    if not np.any(mask):
+        return 0.0
+
+    x_vals = x_vals[mask]
+    weights = weights[mask]
+    if circular:
+        dists = circular_time_distance(x_vals, x_query, period)
+    else:
+        dists = np.abs(x_vals - x_query)
+
+    kernel = np.exp(-0.5 * (dists / bandwidth) ** 2)
+    w = kernel * weights
+    if w.sum() == 0:
+        return 0.0
+
+    return float(effective_sample_size(w) / (effective_sample_size(w) + RELIABILITY_DENOM))
+
+
 def kernel_smooth_curve_circular(x_grid, x_vals, y_vals, weights, bandwidth, period=86400):
     return np.array([
         kernel_predict_circular(x, x_vals, y_vals, weights, bandwidth, period)
         for x in x_grid
     ])
+
+
+def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth=None):
+    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    if len(x_arr) == 0:
+        return None
+
+    x_arr = np.mod(x_arr, 86400)
+    if bandwidth is None:
+        bandwidth = max(circular_time_bandwidth(x_arr) * 0.25, 1e-6)
+
+    grid = np.linspace(0, 86400, 300, endpoint=False)
+    reliabilities = [kernel_reliability(x, x_arr, w_arr, bandwidth, circular=True) for x in grid]
+    quality_preds = kernel_smooth_curve_circular(grid, x_arr, y_arr, w_arr, bandwidth)
+    # use a conservative baseline (lower quartile) so low-reliability predictions are pulled down
+    try:
+        pct25 = float(np.nanpercentile(y_arr, BASELINE_PERCENTILE)) if len(y_arr) > 0 else float(np.nanmean(y_arr))
+    except Exception:
+        pct25 = float(np.nanmean(y_arr))
+    try:
+        local_min = float(np.nanmin(y_arr)) if len(y_arr) > 0 else pct25
+    except Exception:
+        local_min = pct25
+    baseline = max(0.0, min(pct25, local_min - 1.0))
+    # effective prediction pulls each prediction toward the conservative baseline by (1 - reliability)
+    # use GLOBAL_BIAS_DEFAULT to control shrinkage strength
+    quality_effective = [
+        (pred * rel + baseline * GLOBAL_BIAS_DEFAULT) / (rel + GLOBAL_BIAS_DEFAULT)
+        for pred, rel in zip(quality_preds, reliabilities)
+    ]
+
+    plt.figure(figsize=(FIG_SIZE + 2, FIG_SIZE + 1))
+    ax = plt.gca()
+    ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
+    point_sizes = 40 + 120 * (w_arr / max(w_arr.max(), 1e-9))
+    ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Reliability")
+    ax.set_ylim(0, 1)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    configure_time_of_day_axis(ax)
+
+    ax2 = ax.twinx()
+    ax2.plot(grid, quality_effective, color="tab:orange", linewidth=2, label="Effective quality")
+    ax2.set_ylabel(ylabel)
+    ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
+
+    handles, labels = ax.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(handles + handles2, labels + labels2, loc="upper right")
+    return save_plot(title)
+
+
+def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
+    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    if len(x_arr) == 0:
+        return None
+
+    if bandwidth is None:
+        bandwidth = max(np.std(x_arr) * 0.25, 1e-6)
+
+    grid = np.linspace(x_arr.min(), x_arr.max(), 300)
+    reliabilities = [kernel_reliability(x, x_arr, w_arr, bandwidth) for x in grid]
+    quality_preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
+    # use GLOBAL_BIAS_DEFAULT to control shrinkage strength
+    try:
+        pct25 = float(np.nanpercentile(y_arr, BASELINE_PERCENTILE)) if len(y_arr) > 0 else float(np.nanmean(y_arr))
+    except Exception:
+        pct25 = float(np.nanmean(y_arr))
+    try:
+        local_min = float(np.nanmin(y_arr)) if len(y_arr) > 0 else pct25
+    except Exception:
+        local_min = pct25
+    baseline = max(0.0, min(pct25, local_min - 1.0))
+    quality_effective = [
+        (pred * rel + baseline * GLOBAL_BIAS_DEFAULT) / (rel + GLOBAL_BIAS_DEFAULT)
+        for pred, rel in zip(quality_preds, reliabilities)
+    ]
+
+    plt.figure(figsize=(FIG_SIZE + 1, FIG_SIZE))
+    ax = plt.gca()
+    ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
+    point_sizes = 40 + 120 * (w_arr / max(w_arr.max(), 1e-9))
+    ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Reliability")
+    ax.set_ylim(0, 1)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    if "hour" in xlabel.lower():
+        ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
+        ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+
+    ax2 = ax.twinx()
+    ax2.plot(grid, quality_effective, color="tab:orange", linewidth=2, label="Effective quality")
+    ax2.set_ylabel(ylabel)
+    ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
+
+    handles, labels = ax.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(handles + handles2, labels + labels2, loc="upper right")
+    return save_plot(title)
 
 
 def circular_time_bandwidth(x_arr, period=86400):
@@ -464,9 +689,143 @@ def plot_alarm_time(rows, bandwidth=BANDWIDTH_ALARM):
         alarm_weights,
         "Alarm time",
         "Expected sleep quality",
-        "Weighted alarm-time effect",
+        "Alarm time vs Sleep quality",
         bandwidth=bandwidth,
     )
+
+
+def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None):
+    """
+    Compute best sleep goal by optimizing over bedtime, alarm time, and time in bed.
+    
+    Parameters:
+    - rows: list of sleep data rows
+    - time_in_bed_min_hours: minimum time in bed to consider (hours)
+    - time_in_bed_max_hours: maximum time in bed to consider (hours)
+    - step_minutes: step size for search grid (minutes)
+    - fixed_bedtime: if provided (in seconds), use this bedtime and optimize the other two parameters
+    - fixed_alarm_time: if provided (in seconds), use this alarm time and optimize the other two parameters
+    - fixed_time_in_bed_hours: if provided (in hours), use this time in bed and optimize the other two parameters
+    
+    Returns: dict with alarm_time, bedtime, time_in_bed_hours, predicted_quality
+    """
+    # Prepare predictors (x values, y quality, weights)
+    bed_x = np.array([r["Went to bed"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    bed_y = np.array([r["Sleep Quality"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    bed_w = np.array([r["Weight"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+
+    alarm_x = np.array([r["Wake up window stop"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    alarm_y = np.array([r["Sleep Quality"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    alarm_w = np.array([r["Weight"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+
+    tib_x = np.array([r["Time in bed (seconds)"] / 3600.0 for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    tib_y = np.array([r["Sleep Quality"] for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    tib_w = np.array([r["Weight"] for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+
+    # Fallback means
+    global_mean = np.mean([r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None]) if any(r["Sleep Quality"] is not None for r in rows) else 0
+    try:
+        global_baseline = float(np.nanpercentile([r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None], BASELINE_PERCENTILE))
+    except Exception:
+        global_baseline = global_mean
+
+    # Bandwidths
+    if len(bed_x) > 0:
+        bed_bw = max(circular_time_bandwidth(bed_x) * 0.25, 1e-6)
+    else:
+        bed_bw = BANDWIDTH_ALARM
+    if len(alarm_x) > 0:
+        alarm_bw = BANDWIDTH_ALARM
+    else:
+        alarm_bw = BANDWIDTH_ALARM
+    if len(tib_x) > 0:
+        tib_bw = max(np.std(tib_x) * 0.25, 1e-6)
+    else:
+        tib_bw = 0.5
+
+    def local_effective_sample_size(weights):
+        mask = np.isfinite(weights) & (weights > 0)
+        if not np.any(mask):
+            return 0.0
+        w = np.asarray(weights, dtype=float)[mask]
+        return float((w.sum() ** 2) / np.sum(w ** 2))
+
+    def predict_with_reliability(query, x_vals, y_vals, weights, bandwidth, circular=False):
+        if len(x_vals) == 0:
+            return np.nan, 0.0
+
+        x_arr = np.asarray(x_vals, dtype=float)
+        y_arr = np.asarray(y_vals, dtype=float)
+        w_arr = np.asarray(weights, dtype=float)
+
+        if circular:
+            dists = circular_time_distance(x_arr, query)
+        else:
+            dists = np.abs(x_arr - query)
+
+        kernel = np.exp(-0.5 * (dists / bandwidth) ** 2)
+        w = kernel * w_arr
+        if w.sum() == 0:
+            return np.nan, 0.0
+
+        pred = np.sum(w * y_arr) / np.sum(w)
+        n_eff = local_effective_sample_size(w)
+        reliability = n_eff / (n_eff + RELIABILITY_DENOM)
+        return float(pred), float(reliability)
+
+    step_sec = int(step_minutes * 60)
+    alarm_candidates = np.arange(0, 86400, step_sec, dtype=int)
+    tib_step = step_minutes / 60.0
+    tib_candidates = np.arange(time_in_bed_min_hours, time_in_bed_max_hours + tib_step / 2.0, tib_step)
+
+    # Parse parameter ranges
+    bedtime_min, bedtime_max = parse_time_range(fixed_bedtime)
+    alarm_min, alarm_max = parse_time_range(fixed_alarm_time)
+    tib_min_fixed, tib_max_fixed = parse_tib_range(fixed_time_in_bed_hours)
+
+    # Apply range constraints to candidates
+    if alarm_min is not None and alarm_max is not None:
+        alarm_candidates = alarm_candidates[(alarm_candidates >= alarm_min) & (alarm_candidates <= alarm_max)]
+    
+    if tib_min_fixed is not None and tib_max_fixed is not None:
+        tib_candidates = tib_candidates[(tib_candidates >= tib_min_fixed) & (tib_candidates <= tib_max_fixed)]
+
+    best = None
+    best_score = -1e9
+
+    # Optimize over free parameters with constraints applied to candidates
+    for tib in tib_candidates:
+        for at in alarm_candidates:
+            bedtime = (at - int(tib * 3600)) % 86400
+            
+            # Check bedtime constraint if specified
+            if bedtime_min is not None and bedtime_max is not None:
+                if bedtime_min <= bedtime_max:
+                    # Normal range (e.g., 22:00 - 23:00)
+                    if not (bedtime_min <= bedtime <= bedtime_max):
+                        continue
+                else:
+                    # Wraparound range (e.g., 23:00 - 02:00 crosses midnight)
+                    if not (bedtime >= bedtime_min or bedtime <= bedtime_max):
+                        continue
+
+            q_bed, rel_bed = predict_with_reliability(bedtime, bed_x, bed_y, bed_w, bed_bw, circular=True)
+            q_alarm, rel_alarm = predict_with_reliability(at, alarm_x, alarm_y, alarm_w, alarm_bw, circular=True)
+            q_tib, rel_tib = predict_with_reliability(tib, tib_x, tib_y, tib_w, tib_bw)
+
+            eff_bed = (q_bed * rel_bed + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_bed + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_bed) else global_baseline
+            eff_alarm = (q_alarm * rel_alarm + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_alarm + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_alarm) else global_baseline
+            eff_tib = (q_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_tib + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_tib) else global_baseline
+
+            total_reliability = rel_bed + rel_alarm + rel_tib
+            total_weight = total_reliability + GLOBAL_BIAS_DEFAULT
+            score = (eff_bed * rel_bed + eff_alarm * rel_alarm + eff_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT) / total_weight
+
+            if score > best_score:
+                best_score = score
+                best = {"alarm_time": int(at), "bedtime": int(bedtime), "time_in_bed_hours": float(tib), "predicted_quality": float(score)}
+
+    return best
 
 
 def load_rows():
@@ -609,19 +968,22 @@ def plot_all(rows):
     plots.append(plot_weighted_scatter([row["Regularity"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Regularity", "Sleep quality", "Sleep regularity vs Sleep quality"))
 
     plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Sleep quality", "Time in bed vs Sleep quality"))
+    plots.append(plot_reliability_line(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Sleep quality", "Time in bed vs Reliability"))
 
     plots.append(plot_weighted_scatter(seconds_to_hours([row["Time asleep (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time asleep (hours)", "Sleep quality", "Time asleep vs Sleep quality"))
 
     plots.append(plot_weighted_scatter_time_of_day([row["Went to bed"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Bedtime", "Sleep quality", "Bedtime vs Sleep quality"))
+    plots.append(plot_reliability_time_of_day([row["Went to bed"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Bedtime", "Sleep quality", "Bedtime vs Reliability"))
 
-    plots.append(plot_weighted_scatter_time_of_day([row["Went to bed"] for row in rows], seconds_to_minutes([row["Asleep after (seconds)"] for row in rows]), [row["Weight"] for row in rows], "Bedtime", "Time to fall asleep (minutes)", "Bedtime vs Time to fall asleep"))
+    plots.append(plot_weighted_scatter_time_of_day([row["Went to bed"] for row in rows], seconds_to_minutes([row["Asleep after (seconds)" ] for row in rows]), [row["Weight"] for row in rows], "Bedtime", "Time to fall asleep (minutes)", "Bedtime vs Time to fall asleep"))
 
     plots.append(plot_alarm_time(rows))
+    plots.append(plot_reliability_time_of_day([row["Wake up window stop"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Alarm time", "Sleep quality", "Alarm time vs Reliability"))
 
     pressure = [row["Air Pressure (Pa)"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
     quality = [row["Sleep Quality"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
     pressure_weights = [row["Weight"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_scatter(pressure, quality, pressure_weights, "Air pressure (Pa)", "Expected sleep quality", "Weighted air-pressure effect (kernel smoothing)", bandwidth=BANDWIDTH_PRESSURE))
+    plots.append(plot_weighted_scatter(pressure, quality, pressure_weights, "Air pressure (Pa)", "Sleep quality", "Air pressure vs Sleep quality", bandwidth=BANDWIDTH_PRESSURE))
 
     mood_bad = [row["Sleep Quality"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None]
     mood_bad_weights = [row["Weight"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None and row["Weight"] is not None]
@@ -782,8 +1144,67 @@ def run_analysis_prints(rows):
     for key, value in expected_effects_cities:
         lines.append(f"{key} -> {int(value.round()):+} %")
 
-    text_path = save_text("expected_effects.txt", "\n".join(lines) + "\n")
-    print(f"Saved expected effects to {text_path}")
+    # Compute best sleep goal (bedtime, alarm, time in bed)
+    best = compute_best_sleep_goal(rows)
+    if best is not None:
+        lines.append("\nBest sleep goal (maximize expected sleep quality):")
+        lines.append(f"Bedtime: {format_seconds_to_24h_label(best['bedtime'])}")
+        lines.append(f"Alarm: {format_seconds_to_24h_label(best['alarm_time'])}")
+        tib_h = int(best['time_in_bed_hours'])
+        tib_min = int(round((best['time_in_bed_hours'] - tib_h) * 60))
+        # Avoid showing 60 minutes (e.g., 11h 60m) — carry into hours
+        if tib_min >= 60:
+            tib_h += tib_min // 60
+            tib_min = tib_min % 60
+        lines.append(f"Time in bed: {tib_h}h {tib_min}m")
+        lines.append(f"Predicted sleep quality: {best['predicted_quality']:.1f} %")
+
+    # Compute constrained sleep goals if any fixed parameters are set
+    if FIXED_BEDTIME is not None or FIXED_ALARM_TIME is not None or FIXED_TIME_IN_BED_HOURS is not None:
+        best_constrained = compute_best_sleep_goal(rows, fixed_bedtime=FIXED_BEDTIME, fixed_alarm_time=FIXED_ALARM_TIME, fixed_time_in_bed_hours=FIXED_TIME_IN_BED_HOURS)
+        if best_constrained is not None:
+            lines.append("\nBest sleep goal (with constraints):")
+            
+            # Format bedtime with constraint info
+            bedtime_min, bedtime_max = parse_time_range(FIXED_BEDTIME)
+            if FIXED_BEDTIME is not None:
+                if bedtime_min == bedtime_max:
+                    lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (fixed to {format_seconds_to_24h_label(bedtime_min)})")
+                else:
+                    lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (range {format_seconds_to_24h_label(bedtime_min)} - {format_seconds_to_24h_label(bedtime_max)})")
+            else:
+                lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])}")
+            
+            # Format alarm with constraint info
+            alarm_min, alarm_max = parse_time_range(FIXED_ALARM_TIME)
+            if FIXED_ALARM_TIME is not None:
+                if alarm_min == alarm_max:
+                    lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (fixed to {format_seconds_to_24h_label(alarm_min)})")
+                else:
+                    lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (range {format_seconds_to_24h_label(alarm_min)} - {format_seconds_to_24h_label(alarm_max)})")
+            else:
+                lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])}")
+            
+            # Format time in bed with constraint info
+            tib_h = int(best_constrained['time_in_bed_hours'])
+            tib_min = int(round((best_constrained['time_in_bed_hours'] - tib_h) * 60))
+            if tib_min >= 60:
+                tib_h += tib_min // 60
+                tib_min = tib_min % 60
+            
+            tib_min_fixed, tib_max_fixed = parse_tib_range(FIXED_TIME_IN_BED_HOURS)
+            if FIXED_TIME_IN_BED_HOURS is not None:
+                if tib_min_fixed == tib_max_fixed:
+                    lines.append(f"Time in bed: {tib_h}h {tib_min}m (fixed to {tib_min_fixed:.1f}h)")
+                else:
+                    lines.append(f"Time in bed: {tib_h}h {tib_min}m (range {tib_min_fixed:.1f}h - {tib_max_fixed:.1f}h)")
+            else:
+                lines.append(f"Time in bed: {tib_h}h {tib_min}m")
+            
+            lines.append(f"Predicted sleep quality: {best_constrained['predicted_quality']:.1f} %")
+
+    text_path = save_text("output.txt", "\n".join(lines) + "\n")
+    print(f"Saved output to {text_path}")
 
     plot_alarm_time(rows)
 
@@ -804,5 +1225,4 @@ if __name__ == "__main__":
     created = plot_all(rows)
     run_analysis_prints(rows)
     print(f"Saved {len([p for p in created if p])} plot files to {OUTPUT_DIR}")
-
 
