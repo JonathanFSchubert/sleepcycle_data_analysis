@@ -12,19 +12,6 @@ import matplotlib.ticker as ticker
 import numpy as np
 import statsmodels.api as sm
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-FIG_SIZE = 10
-
-BANDWIDTH_DEFAULT = 0.2
-BANDWIDTH_PRESSURE = 0.35
-BANDWIDTH_ALARM = 45 * 60
-
-# Tunable parameters for reliability and shrinkage
-RELIABILITY_DENOM = 10.0  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
-GLOBAL_BIAS_DEFAULT = 0.05  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
-BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 
 # Optional fixed sleep goal parameters (set to None to optimize, or provide a specific value/range)
 # For bedtime/alarm: time string like "22:30" (fixed) or "22:00 - 23:00" (range) or seconds (0-86400)
@@ -32,6 +19,23 @@ BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 FIXED_BEDTIME = None           # e.g., "22:30" or "22:00 - 23:30" or 81000 (seconds) -> None to optimize
 FIXED_ALARM_TIME = None        # e.g., "07:00" or "07:00 - 09:00" or 25200 (seconds) -> None to optimize
 FIXED_TIME_IN_BED_HOURS = None # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+FIG_SIZE = 10
+
+
+BANDWIDTH_DEFAULT = 0.2
+BANDWIDTH_PRESSURE = 0.35
+BANDWIDTH_ALARM = 45 * 60
+
+
+# Tunable parameters for reliability and shrinkage
+RELIABILITY_DENOM = 10.0  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
+GLOBAL_BIAS_DEFAULT = 0.05  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
+BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 
 
 def yyyy_time_to_datetime(string):
@@ -175,10 +179,21 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
         print("Error: factor never appears!")
         return
 
+
+    rows_relevant = rows
+    """
+    only uses rows after the user started using this note
+
     rows_relevant = rows[first_appearance_index:]
+    """
+
+    """
+    only uses rows where at leat one notes was set. i though maiby it is good to remove rows where the user just didnt bother to use notes...
+    not shure if this good.
 
     if factor.startswith("Note "):
         rows_relevant = [row for row in rows_relevant if len(row["Notes"]) > 0]
+    """
 
     control_means = {}
     for c in control_columns:
@@ -1225,4 +1240,3 @@ if __name__ == "__main__":
     created = plot_all(rows)
     run_analysis_prints(rows)
     print(f"Saved {len([p for p in created if p])} plot files to {OUTPUT_DIR}")
-
