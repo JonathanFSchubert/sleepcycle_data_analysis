@@ -33,8 +33,8 @@ BANDWIDTH_ALARM = 45 * 60
 
 
 # Tunable parameters for reliability and shrinkage
-RELIABILITY_DENOM = 10.0  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
-GLOBAL_BIAS_DEFAULT = 0.05  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
+RELIABILITY_DENOM = 1.8  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
+GLOBAL_BIAS_DEFAULT = 0.15  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
 BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 
 
