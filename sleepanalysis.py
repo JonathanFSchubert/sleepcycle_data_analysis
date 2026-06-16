@@ -24,7 +24,7 @@ FIXED_TIME_IN_BED_HOURS = None # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-FIG_SIZE = 10
+FIG_SIZE = 20
 
 
 BANDWIDTH_DEFAULT = 0.2
