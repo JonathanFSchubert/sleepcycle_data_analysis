@@ -33,6 +33,7 @@ BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
 BANDWIDTH_PRESSURE = 0.35
 BANDWIDTH_ALARM = 45 * 60
 
+TOP_N_SLEEP_GOAL_CADIDATES = 5  # number of top sleep-goal candidates to return
 
 # Tunable parameters for reliability and shrinkage
 RELIABILITY_DENOM = 1.8  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
@@ -809,7 +810,7 @@ def plot_alarm_time(rows, bandwidth=BANDWIDTH_ALARM):
     )
 
 
-def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None, top_n=3):
+def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None, top_n=TOP_N_SLEEP_GOAL_CADIDATES):
     """
     Compute sleep-goal candidates by optimizing over bedtime, alarm time, and time in bed.
     
@@ -1287,9 +1288,9 @@ def run_analysis_prints(rows):
         lines.append(f"{key} -> {int(value.round()):+} %")
 
     # Compute top sleep goals (bedtime, alarm, time in bed)
-    best_goals = compute_best_sleep_goal(rows, top_n=3)
+    best_goals = compute_best_sleep_goal(rows, top_n=TOP_N_SLEEP_GOAL_CADIDATES)
     if best_goals:
-        lines.append("\nTop 3 sleep goals (maximize expected sleep quality):")
+        lines.append(f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (maximize expected sleep quality):")
         for index, best in enumerate(best_goals, start=1):
             lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best['bedtime'])}")
             lines.append(f"   Alarm: {format_seconds_to_24h_label(best['alarm_time'])}")
@@ -1309,10 +1310,10 @@ def run_analysis_prints(rows):
             fixed_bedtime=FIXED_BEDTIME,
             fixed_alarm_time=FIXED_ALARM_TIME,
             fixed_time_in_bed_hours=FIXED_TIME_IN_BED_HOURS,
-            top_n=3,
+            top_n=TOP_N_SLEEP_GOAL_CADIDATES,
         )
         if best_constrained_goals:
-            lines.append("\nTop 3 sleep goals (with constraints):")
+            lines.append(f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (with constraints):")
             for index, best_constrained in enumerate(best_constrained_goals, start=1):
                 # Format bedtime with constraint info
                 bedtime_min, bedtime_max = parse_time_range(FIXED_BEDTIME)
