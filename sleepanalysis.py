@@ -27,10 +27,10 @@ OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
 FIG_SIZE = 20
 
 
-BANDWIDTH_DEFAULT = 0.25  # default multiplier for kernel bandwidth from data standard deviation
+BANDWIDTH_DEFAULT = 0.3  # default multiplier for kernel bandwidth from data standard deviation
 BANDWIDTH_CIRCULAR_FACTOR = 0.25  # circular bandwidth factor for time-of-day kernels
 BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
-BANDWIDTH_PRESSURE = 0.35
+BANDWIDTH_PRESSURE = 0.45
 BANDWIDTH_ALARM = 45 * 60
 
 TOP_N_SLEEP_GOAL_CADIDATES = 5  # number of top sleep-goal candidates to return
@@ -430,7 +430,8 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
     configure_time_of_day_axis(ax)
 
     ax2 = ax.twinx()
-    ax2.plot(grid, quality_effective, color="tab:orange", linewidth=2, label="Effective quality")
+    ax2.plot(grid, quality_preds, color="tab:orange", linewidth=2, linestyle="--", label="Raw quality")
+    ax2.plot(grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality")
     ax2.set_ylabel(ylabel)
     ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
 
@@ -481,11 +482,10 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
     if "hour" in xlabel.lower():
         ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
-    maybe_limit_axis(ax, x_arr, weights=w_arr, axis="x")
-    maybe_limit_axis(ax, y_arr, weights=w_arr, axis="y")
 
     ax2 = ax.twinx()
-    ax2.plot(grid, quality_effective, color="tab:orange", linewidth=2, label="Effective quality")
+    ax2.plot(grid, quality_preds, color="tab:orange", linewidth=2, linestyle="--", label="Raw quality")
+    ax2.plot(grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality")
     ax2.set_ylabel(ylabel)
     ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
 
@@ -552,40 +552,6 @@ def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", 
 
     return sorted(results.items(), key=lambda item: item[1], reverse=True)
 
-
-def maybe_limit_axis(ax, values, weights=None, axis="x"):
-    values = np.asarray(values, dtype=float)
-    mask = np.isfinite(values)
-    if not np.any(mask):
-        return
-
-    vals = values[mask]
-    vmin = np.nanmin(vals)
-    vmax = np.nanmax(vals)
-    if vmin >= 0.0 and vmax <= 100.0 and (vmax - vmin) <= 120.0:
-        return
-
-    if weights is not None:
-        weights = np.asarray(weights, dtype=float)
-        weights = weights[mask]
-        if np.any(np.isfinite(weights)) and weights.sum() > 0:
-            q_low = float(weighted_quantile(vals, weights, [0.01])[0])
-            q_high = float(weighted_quantile(vals, weights, [0.99])[0])
-        else:
-            q_low = float(np.nanpercentile(vals, 1))
-            q_high = float(np.nanpercentile(vals, 99))
-    else:
-        q_low = float(np.nanpercentile(vals, 1))
-        q_high = float(np.nanpercentile(vals, 99))
-
-    if not np.isfinite(q_low) or not np.isfinite(q_high) or q_high <= q_low:
-        return
-
-    margin = max((q_high - q_low) * 0.05, 1e-6)
-    if axis == "x":
-        ax.set_xlim(q_low - margin, q_high + margin)
-    else:
-        ax.set_ylim(q_low - margin, q_high + margin)
 
 
 def format_seconds_to_24h_label(seconds):
@@ -660,7 +626,7 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, inve
     return save_plot(title)
 
 
-def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None, postprocess_ax=None, limit_axes=True):
+def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None, postprocess_ax=None):
     x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
@@ -687,9 +653,6 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, 
     if "hour" in xlabel.lower():
         ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
-    if limit_axes:
-        maybe_limit_axis(ax, x_arr, weights=w_arr, axis="x")
-        maybe_limit_axis(ax, y_arr, weights=w_arr, axis="y")
     if postprocess_ax is not None:
         postprocess_ax(ax)
     if invert_x:
@@ -1072,8 +1035,8 @@ def plot_all(rows):
     plots.append(plot_weighted_scatter([row["Weather temperature (°C)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Weather temperature (°C)", "Sleep quality", "Weather temperature vs Sleep quality"))
     plots.append(plot_weighted_scatter([row["Ambient noise (dB)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient noise (dB)", "Sleep quality", "Ambient noise vs Sleep quality"))
     plots.append(plot_weighted_scatter([row["Ambient light (lux)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient light (lux)", "Sleep quality", "Ambient light vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis, limit_axes=False))
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis, limit_axes=False))
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis))
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis))
 
     plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Alertness score", "Alertness vs Time in bed"))
 
