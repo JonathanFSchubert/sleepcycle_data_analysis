@@ -809,9 +809,9 @@ def plot_alarm_time(rows, bandwidth=BANDWIDTH_ALARM):
     )
 
 
-def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None):
+def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None, top_n=3):
     """
-    Compute best sleep goal by optimizing over bedtime, alarm time, and time in bed.
+    Compute sleep-goal candidates by optimizing over bedtime, alarm time, and time in bed.
     
     Parameters:
     - rows: list of sleep data rows
@@ -821,8 +821,9 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     - fixed_bedtime: if provided (in seconds), use this bedtime and optimize the other two parameters
     - fixed_alarm_time: if provided (in seconds), use this alarm time and optimize the other two parameters
     - fixed_time_in_bed_hours: if provided (in hours), use this time in bed and optimize the other two parameters
+    - top_n: number of highest-scoring candidates to return
     
-    Returns: dict with alarm_time, bedtime, time_in_bed_hours, predicted_quality
+    Returns: list of dicts with alarm_time, bedtime, time_in_bed_hours, predicted_quality
     """
     # Prepare predictors (x values, y quality, weights)
     bed_x = np.array([r["Went to bed"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
@@ -905,8 +906,7 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     if tib_min_fixed is not None and tib_max_fixed is not None:
         tib_candidates = tib_candidates[(tib_candidates >= tib_min_fixed) & (tib_candidates <= tib_max_fixed)]
 
-    best = None
-    best_score = -1e9
+    candidates = []
 
     # Optimize over free parameters with constraints applied to candidates
     for tib in tib_candidates:
@@ -936,11 +936,10 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
             total_weight = total_reliability + GLOBAL_BIAS_DEFAULT
             score = (eff_bed * rel_bed + eff_alarm * rel_alarm + eff_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT) / total_weight
 
-            if score > best_score:
-                best_score = score
-                best = {"alarm_time": int(at), "bedtime": int(bedtime), "time_in_bed_hours": float(tib), "predicted_quality": float(score)}
+            candidates.append({"alarm_time": int(at), "bedtime": int(bedtime), "time_in_bed_hours": float(tib), "predicted_quality": float(score)})
 
-    return best
+    candidates.sort(key=lambda item: item["predicted_quality"], reverse=True)
+    return candidates[: max(1, int(top_n))]
 
 
 def load_rows():
@@ -1287,64 +1286,71 @@ def run_analysis_prints(rows):
     for key, value in expected_effects_cities:
         lines.append(f"{key} -> {int(value.round()):+} %")
 
-    # Compute best sleep goal (bedtime, alarm, time in bed)
-    best = compute_best_sleep_goal(rows)
-    if best is not None:
-        lines.append("\nBest sleep goal (maximize expected sleep quality):")
-        lines.append(f"Bedtime: {format_seconds_to_24h_label(best['bedtime'])}")
-        lines.append(f"Alarm: {format_seconds_to_24h_label(best['alarm_time'])}")
-        tib_h = int(best['time_in_bed_hours'])
-        tib_min = int(round((best['time_in_bed_hours'] - tib_h) * 60))
-        # Avoid showing 60 minutes (e.g., 11h 60m) — carry into hours
-        if tib_min >= 60:
-            tib_h += tib_min // 60
-            tib_min = tib_min % 60
-        lines.append(f"Time in bed: {tib_h}h {tib_min}m")
-        lines.append(f"Predicted sleep quality: {best['predicted_quality']:.1f} %")
-
-    # Compute constrained sleep goals if any fixed parameters are set
-    if FIXED_BEDTIME is not None or FIXED_ALARM_TIME is not None or FIXED_TIME_IN_BED_HOURS is not None:
-        best_constrained = compute_best_sleep_goal(rows, fixed_bedtime=FIXED_BEDTIME, fixed_alarm_time=FIXED_ALARM_TIME, fixed_time_in_bed_hours=FIXED_TIME_IN_BED_HOURS)
-        if best_constrained is not None:
-            lines.append("\nBest sleep goal (with constraints):")
-            
-            # Format bedtime with constraint info
-            bedtime_min, bedtime_max = parse_time_range(FIXED_BEDTIME)
-            if FIXED_BEDTIME is not None:
-                if bedtime_min == bedtime_max:
-                    lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (fixed to {format_seconds_to_24h_label(bedtime_min)})")
-                else:
-                    lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (range {format_seconds_to_24h_label(bedtime_min)} - {format_seconds_to_24h_label(bedtime_max)})")
-            else:
-                lines.append(f"Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])}")
-            
-            # Format alarm with constraint info
-            alarm_min, alarm_max = parse_time_range(FIXED_ALARM_TIME)
-            if FIXED_ALARM_TIME is not None:
-                if alarm_min == alarm_max:
-                    lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (fixed to {format_seconds_to_24h_label(alarm_min)})")
-                else:
-                    lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (range {format_seconds_to_24h_label(alarm_min)} - {format_seconds_to_24h_label(alarm_max)})")
-            else:
-                lines.append(f"Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])}")
-            
-            # Format time in bed with constraint info
-            tib_h = int(best_constrained['time_in_bed_hours'])
-            tib_min = int(round((best_constrained['time_in_bed_hours'] - tib_h) * 60))
+    # Compute top sleep goals (bedtime, alarm, time in bed)
+    best_goals = compute_best_sleep_goal(rows, top_n=3)
+    if best_goals:
+        lines.append("\nTop 3 sleep goals (maximize expected sleep quality):")
+        for index, best in enumerate(best_goals, start=1):
+            lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best['bedtime'])}")
+            lines.append(f"   Alarm: {format_seconds_to_24h_label(best['alarm_time'])}")
+            tib_h = int(best['time_in_bed_hours'])
+            tib_min = int(round((best['time_in_bed_hours'] - tib_h) * 60))
+            # Avoid showing 60 minutes (e.g., 11h 60m) — carry into hours
             if tib_min >= 60:
                 tib_h += tib_min // 60
                 tib_min = tib_min % 60
-            
-            tib_min_fixed, tib_max_fixed = parse_tib_range(FIXED_TIME_IN_BED_HOURS)
-            if FIXED_TIME_IN_BED_HOURS is not None:
-                if tib_min_fixed == tib_max_fixed:
-                    lines.append(f"Time in bed: {tib_h}h {tib_min}m (fixed to {tib_min_fixed:.1f}h)")
+            lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
+            lines.append(f"   Predicted sleep quality: {best['predicted_quality']:.1f} %")
+
+    # Compute constrained sleep goals if any fixed parameters are set
+    if FIXED_BEDTIME is not None or FIXED_ALARM_TIME is not None or FIXED_TIME_IN_BED_HOURS is not None:
+        best_constrained_goals = compute_best_sleep_goal(
+            rows,
+            fixed_bedtime=FIXED_BEDTIME,
+            fixed_alarm_time=FIXED_ALARM_TIME,
+            fixed_time_in_bed_hours=FIXED_TIME_IN_BED_HOURS,
+            top_n=3,
+        )
+        if best_constrained_goals:
+            lines.append("\nTop 3 sleep goals (with constraints):")
+            for index, best_constrained in enumerate(best_constrained_goals, start=1):
+                # Format bedtime with constraint info
+                bedtime_min, bedtime_max = parse_time_range(FIXED_BEDTIME)
+                if FIXED_BEDTIME is not None:
+                    if bedtime_min == bedtime_max:
+                        lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (fixed to {format_seconds_to_24h_label(bedtime_min)})")
+                    else:
+                        lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (range {format_seconds_to_24h_label(bedtime_min)} - {format_seconds_to_24h_label(bedtime_max)})")
                 else:
-                    lines.append(f"Time in bed: {tib_h}h {tib_min}m (range {tib_min_fixed:.1f}h - {tib_max_fixed:.1f}h)")
-            else:
-                lines.append(f"Time in bed: {tib_h}h {tib_min}m")
-            
-            lines.append(f"Predicted sleep quality: {best_constrained['predicted_quality']:.1f} %")
+                    lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])}")
+                
+                # Format alarm with constraint info
+                alarm_min, alarm_max = parse_time_range(FIXED_ALARM_TIME)
+                if FIXED_ALARM_TIME is not None:
+                    if alarm_min == alarm_max:
+                        lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (fixed to {format_seconds_to_24h_label(alarm_min)})")
+                    else:
+                        lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (range {format_seconds_to_24h_label(alarm_min)} - {format_seconds_to_24h_label(alarm_max)})")
+                else:
+                    lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])}")
+                
+                # Format time in bed with constraint info
+                tib_h = int(best_constrained['time_in_bed_hours'])
+                tib_min = int(round((best_constrained['time_in_bed_hours'] - tib_h) * 60))
+                if tib_min >= 60:
+                    tib_h += tib_min // 60
+                    tib_min = tib_min % 60
+                
+                tib_min_fixed, tib_max_fixed = parse_tib_range(FIXED_TIME_IN_BED_HOURS)
+                if FIXED_TIME_IN_BED_HOURS is not None:
+                    if tib_min_fixed == tib_max_fixed:
+                        lines.append(f"   Time in bed: {tib_h}h {tib_min}m (fixed to {tib_min_fixed:.1f}h)")
+                    else:
+                        lines.append(f"   Time in bed: {tib_h}h {tib_min}m (range {tib_min_fixed:.1f}h - {tib_max_fixed:.1f}h)")
+                else:
+                    lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
+                
+                lines.append(f"   Predicted sleep quality: {best_constrained['predicted_quality']:.1f} %")
 
     text_path = save_text("output.txt", "\n".join(lines) + "\n")
     print(f"Saved output to {text_path}")
