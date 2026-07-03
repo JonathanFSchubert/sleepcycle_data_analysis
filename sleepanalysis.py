@@ -27,7 +27,9 @@ OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
 FIG_SIZE = 20
 
 
-BANDWIDTH_DEFAULT = 0.2
+BANDWIDTH_DEFAULT = 0.25  # default multiplier for kernel bandwidth from data standard deviation
+BANDWIDTH_CIRCULAR_FACTOR = 0.25  # circular bandwidth factor for time-of-day kernels
+BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
 BANDWIDTH_PRESSURE = 0.35
 BANDWIDTH_ALARM = 45 * 60
 
@@ -392,7 +394,7 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
 
     x_arr = np.mod(x_arr, 86400)
     if bandwidth is None:
-        bandwidth = max(circular_time_bandwidth(x_arr) * 0.25, 1e-6)
+        bandwidth = max(circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
 
     grid = np.linspace(0, 86400, 300, endpoint=False)
     reliabilities = [kernel_reliability(x, x_arr, w_arr, bandwidth, circular=True) for x in grid]
@@ -445,7 +447,7 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
         return None
 
     if bandwidth is None:
-        bandwidth = max(np.std(x_arr) * 0.25, 1e-6)
+        bandwidth = max(np.std(x_arr) * BANDWIDTH_DEFAULT, BANDWIDTH_MIN)
 
     grid = np.linspace(x_arr.min(), x_arr.max(), 300)
     reliabilities = [kernel_reliability(x, x_arr, w_arr, bandwidth) for x in grid]
@@ -478,6 +480,8 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
     if "hour" in xlabel.lower():
         ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+    maybe_limit_axis(ax, x_arr, weights=w_arr, axis="x")
+    maybe_limit_axis(ax, y_arr, weights=w_arr, axis="y")
 
     ax2 = ax.twinx()
     ax2.plot(grid, quality_effective, color="tab:orange", linewidth=2, label="Effective quality")
@@ -509,6 +513,80 @@ def save_plot(title):
     return path
 
 
+def compute_moon_phase(date):
+    if date is None:
+        return None
+
+    epoch = datetime(2000, 1, 6, 18, 14, 0)
+    delta = date - epoch
+    days = delta.days + delta.seconds / 86400.0
+    return float(days / 29.530588853 % 1.0)
+
+
+def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", control_columns=None):
+    if control_columns is None:
+        control_columns = []
+    if not factor_names:
+        return []
+
+    values = [row[result_column] for row in rows if row.get(result_column) is not None]
+    sigma_y = np.std(values, ddof=1) if len(values) > 1 else 0.0
+
+    results = {}
+    for factor in factor_names:
+        factor_values = np.array([row[factor] for row in rows if row.get(factor) is not None], dtype=float)
+        if len(factor_values) == 0:
+            continue
+
+        p = float(np.mean(factor_values))
+        if p in (0.0, 1.0):
+            results[factor] = 0.0
+            continue
+
+        corr = weighted_partial_correlation(rows=rows, factor=factor, result=result_column, control_columns=control_columns)
+        if corr is None:
+            continue
+
+        results[factor] = corr * sigma_y / np.sqrt(p * (1.0 - p))
+
+    return sorted(results.items(), key=lambda item: item[1], reverse=True)
+
+
+def maybe_limit_axis(ax, values, weights=None, axis="x"):
+    values = np.asarray(values, dtype=float)
+    mask = np.isfinite(values)
+    if not np.any(mask):
+        return
+
+    vals = values[mask]
+    vmin = np.nanmin(vals)
+    vmax = np.nanmax(vals)
+    if vmin >= 0.0 and vmax <= 100.0 and (vmax - vmin) <= 120.0:
+        return
+
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        weights = weights[mask]
+        if np.any(np.isfinite(weights)) and weights.sum() > 0:
+            q_low = float(weighted_quantile(vals, weights, [0.01])[0])
+            q_high = float(weighted_quantile(vals, weights, [0.99])[0])
+        else:
+            q_low = float(np.nanpercentile(vals, 1))
+            q_high = float(np.nanpercentile(vals, 99))
+    else:
+        q_low = float(np.nanpercentile(vals, 1))
+        q_high = float(np.nanpercentile(vals, 99))
+
+    if not np.isfinite(q_low) or not np.isfinite(q_high) or q_high <= q_low:
+        return
+
+    margin = max((q_high - q_low) * 0.05, 1e-6)
+    if axis == "x":
+        ax.set_xlim(q_low - margin, q_high + margin)
+    else:
+        ax.set_ylim(q_low - margin, q_high + margin)
+
+
 def format_seconds_to_24h_label(seconds):
     seconds = int(seconds) % 86400
     hours = seconds // 3600
@@ -531,6 +609,23 @@ def configure_time_of_day_axis(ax):
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
 
+def configure_moon_phase_axis(ax):
+    phase_positions = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
+    phase_labels = [
+        "New Moon",
+        "Waxing Crescent",
+        "First Quarter",
+        "Waxing Gibbous",
+        "Full Moon",
+        "Waning Gibbous",
+        "Last Quarter",
+        "Waning Crescent",
+    ]
+    ax.set_xticks(phase_positions)
+    ax.set_xticklabels(phase_labels, rotation=45, ha="right")
+    ax.set_xlim(-0.01, 1.0)
+
+
 def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None):
     x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
@@ -542,7 +637,7 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, inve
     x_arr = np.mod(x_arr, 86400)
 
     if bandwidth is None:
-        bandwidth = max(circular_time_bandwidth(x_arr) * 0.25, 1e-6)
+        bandwidth = max(circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
 
     grid = np.linspace(0, 86400, 300, endpoint=False)
     preds = kernel_smooth_curve_circular(grid, x_arr, y_arr, w_arr, bandwidth)
@@ -564,7 +659,7 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, inve
     return save_plot(title)
 
 
-def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None):
+def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None, postprocess_ax=None, limit_axes=True):
     x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
@@ -573,7 +668,7 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, 
         return None
 
     if bandwidth is None:
-        bandwidth = max(np.std(x_arr) * 0.25, 1e-6)
+        bandwidth = max(np.std(x_arr) * BANDWIDTH_DEFAULT, BANDWIDTH_MIN)
 
     grid = np.linspace(x_arr.min(), x_arr.max(), 300)
     preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
@@ -591,6 +686,11 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, 
     if "hour" in xlabel.lower():
         ax.xaxis.set_major_locator(ticker.MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
+    if limit_axes:
+        maybe_limit_axis(ax, x_arr, weights=w_arr, axis="x")
+        maybe_limit_axis(ax, y_arr, weights=w_arr, axis="y")
+    if postprocess_ax is not None:
+        postprocess_ax(ax)
     if invert_x:
         ax.invert_xaxis()
     plt.legend()
@@ -746,7 +846,7 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
 
     # Bandwidths
     if len(bed_x) > 0:
-        bed_bw = max(circular_time_bandwidth(bed_x) * 0.25, 1e-6)
+        bed_bw = max(circular_time_bandwidth(bed_x) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
     else:
         bed_bw = BANDWIDTH_ALARM
     if len(alarm_x) > 0:
@@ -754,7 +854,7 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     else:
         alarm_bw = BANDWIDTH_ALARM
     if len(tib_x) > 0:
-        tib_bw = max(np.std(tib_x) * 0.25, 1e-6)
+        tib_bw = max(np.std(tib_x) * BANDWIDTH_DEFAULT, BANDWIDTH_MIN)
     else:
         tib_bw = 0.5
 
@@ -920,6 +1020,11 @@ def load_rows():
         else:
             row["Weekday"] = None
 
+        if row["Woke up"] is not None:
+            row["Moon phase"] = compute_moon_phase(row["Woke up"])
+        else:
+            row["Moon phase"] = None
+
         if row["Went to bed"] is not None and row["Woke up"] is not None:
             if row["Went to bed"].date() == (row["Woke up"] - timedelta(days=1)).date():
                 row["Went to bed"] = seconds_since_midnight(row["Went to bed"])
@@ -940,6 +1045,7 @@ def load_rows():
     unique_cities = sorted({row["City"] for row in rows if row["City"] is not None})
     unique_notes = sorted({note for row in rows for note in row["Notes"]})
 
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     for row in rows:
         for note in unique_notes:
             row[f"Note {note}"] = 1 if note in row["Notes"] else 0
@@ -947,6 +1053,8 @@ def load_rows():
             row[f"Weather type {weather}"] = 1 if row["Weather type"] == weather else 0
         for city in unique_cities:
             row[f"City {city}"] = 1 if row["City"] == city else 0
+        for weekday in weekday_names:
+            row[f"Weekday {weekday}"] = 1 if row.get("Weekday") == weekday else 0
 
     return rows
 
@@ -961,6 +1069,11 @@ def plot_all(rows):
     plots.append(plot_weighted_boxplot([drug_no, drug_yes], [drug_no_weights, drug_yes_weights], ["No sleep drug", "Sleep drug"], "Asleep after (minutes)", "Sleep drug vs time to fall asleep"))
 
     plots.append(plot_weighted_scatter([row["Sleep Quality"] for row in rows], [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Sleep quality", "Alertness score", "Alertness vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Weather temperature (°C)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Weather temperature (°C)", "Sleep quality", "Weather temperature vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Ambient noise (dB)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient noise (dB)", "Sleep quality", "Ambient noise vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Ambient light (lux)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient light (lux)", "Sleep quality", "Ambient light vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis, limit_axes=False))
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis, limit_axes=False))
 
     plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Alertness score", "Alertness vs Time in bed"))
 
@@ -1125,7 +1238,22 @@ def run_analysis_prints(rows):
     expected_effects_notes = sorted(expected_effects_notes.items(), key=lambda item: item[1], reverse=True)
 
     lines = []
-    lines.append("Expected effects of Notes:")
+    lines.append("Expected effects of weekdays:")
+    for weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+        factor = f"Weekday {weekday}"
+        factor_values = np.array([row[factor] for row in rows if row.get(factor) is not None], dtype=float)
+        if len(factor_values) == 0:
+            effect = 0.0
+        else:
+            p = float(np.mean(factor_values))
+            if p in (0.0, 1.0):
+                effect = 0.0
+            else:
+                corr = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
+                effect = 0.0 if corr is None else corr * sigma_Y / np.sqrt(p * (1.0 - p))
+        lines.append(f"{weekday} -> {int(effect.round()):+} %")
+
+    lines.append("\nExpected effects of Notes:")
     for key, value in expected_effects_notes:
         lines.append(f"{key} -> {int(value.round()):+} %")
 
