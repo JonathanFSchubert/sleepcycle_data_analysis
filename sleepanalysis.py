@@ -1301,7 +1301,7 @@ def run_analysis_prints(rows):
                 tib_h += tib_min // 60
                 tib_min = tib_min % 60
             lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
-            lines.append(f"   Predicted sleep quality: {best['predicted_quality']:.1f} %")
+            lines.append(f"   Predicted sleep quality: {best['predicted_quality']:.2f} %")
 
     # Compute constrained sleep goals if any fixed parameters are set
     if FIXED_BEDTIME is not None or FIXED_ALARM_TIME is not None or FIXED_TIME_IN_BED_HOURS is not None:
@@ -1351,7 +1351,7 @@ def run_analysis_prints(rows):
                 else:
                     lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
                 
-                lines.append(f"   Predicted sleep quality: {best_constrained['predicted_quality']:.1f} %")
+                lines.append(f"   Predicted sleep quality: {best_constrained['predicted_quality']:.2f} %")
 
     text_path = save_text("output.txt", "\n".join(lines) + "\n")
     print(f"Saved output to {text_path}")
