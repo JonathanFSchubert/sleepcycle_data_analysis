@@ -28,7 +28,7 @@ FIG_SIZE = 20
 
 
 BANDWIDTH_DEFAULT = 0.3  # default multiplier for kernel bandwidth from data standard deviation
-BANDWIDTH_CIRCULAR_FACTOR = 0.25  # circular bandwidth factor for time-of-day kernels
+BANDWIDTH_CIRCULAR_FACTOR = 0.3  # circular bandwidth factor for time-of-day kernels
 BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
 BANDWIDTH_PRESSURE = 0.45
 BANDWIDTH_ALARM = 45 * 60
