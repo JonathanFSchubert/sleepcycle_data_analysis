@@ -40,6 +40,9 @@ RELIABILITY_DENOM = 1.8  # denominator added to n_eff when computing reliability
 GLOBAL_BIAS_DEFAULT = 0.15  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
 BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 
+# Half-life for weighting older data points (in days) when computing weighted correlations and predictions
+HALF_LIFE_DAYS = 365
+
 
 def yyyy_time_to_datetime(string):
     if string == "":
@@ -420,7 +423,7 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
     plt.figure(figsize=(FIG_SIZE + 2, FIG_SIZE + 1))
     ax = plt.gca()
     ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
-    point_sizes = 40 + 120 * (w_arr / max(w_arr.max(), 1e-9))
+    point_sizes = 100 * w_arr
     ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Reliability")
@@ -438,6 +441,7 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
     handles, labels = ax.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(handles + handles2, labels + labels2, loc="upper right")
+
     return save_plot(title)
 
 
@@ -472,7 +476,7 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
     plt.figure(figsize=(FIG_SIZE + 1, FIG_SIZE))
     ax = plt.gca()
     ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
-    point_sizes = 40 + 120 * (w_arr / max(w_arr.max(), 1e-9))
+    point_sizes = 100 * w_arr
     ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Reliability")
@@ -514,16 +518,6 @@ def save_plot(title):
     return path
 
 
-def compute_moon_phase(date):
-    if date is None:
-        return None
-
-    epoch = datetime(2000, 1, 6, 18, 14, 0)
-    delta = date - epoch
-    days = delta.days + delta.seconds / 86400.0
-    return float(days / 29.530588853 % 1.0)
-
-
 def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", control_columns=None):
     if control_columns is None:
         control_columns = []
@@ -553,7 +547,6 @@ def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", 
     return sorted(results.items(), key=lambda item: item[1], reverse=True)
 
 
-
 def format_seconds_to_24h_label(seconds):
     seconds = int(seconds) % 86400
     hours = seconds // 3600
@@ -576,6 +569,16 @@ def configure_time_of_day_axis(ax):
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
 
+def compute_moon_phase(date):
+    if date is None:
+        return None
+
+    epoch = datetime(2000, 1, 6, 18, 14, 0)
+    delta = date - epoch
+    days = delta.days + delta.seconds / 86400.0
+    return float(days / 29.530588853 % 1.0)
+
+
 def configure_moon_phase_axis(ax):
     phase_positions = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
     phase_labels = [
@@ -593,7 +596,7 @@ def configure_moon_phase_axis(ax):
     ax.set_xlim(-0.01, 1.0)
 
 
-def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None):
+def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth=None):
     x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
@@ -610,7 +613,7 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, inve
     preds = kernel_smooth_curve_circular(grid, x_arr, y_arr, w_arr, bandwidth)
 
     plt.figure(figsize=(FIG_SIZE + 2, FIG_SIZE + 1))
-    sizes = 70 * (w_arr / max(w_arr.max(), 1e-9))
+    sizes = 100 * w_arr
     plt.scatter(x_arr, y_arr, s=sizes, alpha=0.6, color="tab:blue", edgecolors="none")
     plt.plot(grid, preds, color="red", linewidth=2, label="Weighted kernel smooth")
 
@@ -619,14 +622,12 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, inve
     plt.title(title)
     plt.grid(True, alpha=0.3)
     ax = plt.gca()
-    if invert_x:
-        ax.invert_xaxis()
     configure_time_of_day_axis(ax)
     plt.legend()
     return save_plot(title)
 
 
-def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, bandwidth=None, postprocess_ax=None):
+def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, bandwidth=None, postprocess_ax=None, circular=False, period=1.0):
     x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
     w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
@@ -637,11 +638,18 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, 
     if bandwidth is None:
         bandwidth = max(np.std(x_arr) * BANDWIDTH_DEFAULT, BANDWIDTH_MIN)
 
-    grid = np.linspace(x_arr.min(), x_arr.max(), 300)
-    preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
+    if circular:
+        grid = np.linspace(0, period, 400, endpoint=False)
+        preds = np.array([
+            kernel_predict_circular(xq, x_arr, y_arr, w_arr, bandwidth, period)
+            for xq in grid
+        ])
+    else:
+        grid = np.linspace(x_arr.min(), x_arr.max(), 300)
+        preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
 
     plt.figure(figsize=(FIG_SIZE + 1, FIG_SIZE))
-    sizes = 70 * (w_arr / max(w_arr.max(), 1e-9))
+    sizes = 100 * w_arr
     plt.scatter(x_arr, y_arr, s=sizes, alpha=0.6, color="tab:blue", edgecolors="none")
     plt.plot(grid, preds, color="red", linewidth=2, label="Weighted kernel smooth")
 
@@ -655,13 +663,11 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, invert_x=False, 
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
     if postprocess_ax is not None:
         postprocess_ax(ax)
-    if invert_x:
-        ax.invert_xaxis()
     plt.legend()
     return save_plot(title)
 
 
-def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title, invert_x=False):
+def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title):
     fig, ax = plt.subplots(figsize=(FIG_SIZE, FIG_SIZE))
     stats = []
     positions = list(range(1, len(labels) + 1))
@@ -713,7 +719,7 @@ def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title, in
             "fliers": fliers,
         })
 
-    ax.bxp(stats, positions=positions, showfliers=True, widths=0.6, patch_artist=True)
+    ax.bxp(stats, positions=positions, showfliers=False, widths=0.6, patch_artist=True)
 
     for i, (values, weights) in enumerate(zip(group_values, group_weights), start=1):
         values = np.asarray(values, dtype=float)
@@ -723,15 +729,13 @@ def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title, in
             continue
 
         x_jitter = np.random.normal(i, 0.08, size=mask.sum())
-        sizes = 20 + 120 * (weights[mask] / max(weights[mask].max(), 1e-9))
+        sizes = 100 * weights[mask]
         ax.scatter(x_jitter, values[mask], s=sizes, alpha=0.5, color="gray", edgecolors="none")
 
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    if invert_x:
-        ax.invert_xaxis()
 
     return save_plot(title)
 
@@ -968,7 +972,6 @@ def load_rows():
         else:
             row["Age (days)"] = None
 
-    HALF_LIFE_DAYS = 365
     LAMBDA = math.log(2) / HALF_LIFE_DAYS
 
     for row in rows:
@@ -983,8 +986,8 @@ def load_rows():
         else:
             row["Weekday"] = None
 
-        if row["Woke up"] is not None:
-            row["Moon phase"] = compute_moon_phase(row["Woke up"])
+        if row["Went to bed"] is not None:
+            row["Moon phase"] = compute_moon_phase(row["Went to bed"])
         else:
             row["Moon phase"] = None
 
@@ -1025,36 +1028,42 @@ def load_rows():
 def plot_all(rows):
     plots = []
 
-    drug_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None]
-    drug_yes_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    drug_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None]
-    drug_no_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_boxplot([drug_no, drug_yes], [drug_no_weights, drug_yes_weights], ["No sleep drug", "Sleep drug"], "Asleep after (minutes)", "Sleep drug vs time to fall asleep"))
+    # sleep drug vs time to fall asleep
+    sleep_drug_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None]
+    sleep_drug_yes_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
+    sleep_drug_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None]
+    sleep_drug_no_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
+    plots.append(plot_weighted_boxplot([sleep_drug_no, sleep_drug_yes], [sleep_drug_no_weights, sleep_drug_yes_weights], ["No sleep drug", "Sleep drug"], "Asleep after (minutes)", "Sleep drug vs time to fall asleep"))
 
-    plots.append(plot_weighted_scatter([row["Sleep Quality"] for row in rows], [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Sleep quality", "Alertness score", "Alertness vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Weather temperature (°C)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Weather temperature (°C)", "Sleep quality", "Weather temperature vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Ambient noise (dB)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient noise (dB)", "Sleep quality", "Ambient noise vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Ambient light (lux)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient light (lux)", "Sleep quality", "Ambient light vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis))
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis))
-
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Alertness score", "Alertness vs Time in bed"))
-
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time asleep (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time asleep (hours)", "Alertness score", "Alertness vs Time asleep"))
-
+    # coffee vs time to fall asleep
     coffee_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Coffee"] == 1 and row["Asleep after (seconds)"] is not None]
     coffee_yes_weights = [row["Weight"] for row in rows if row["Coffee"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
     coffee_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Coffee"] == 0 and row["Asleep after (seconds)"] is not None]
     coffee_no_weights = [row["Weight"] for row in rows if row["Coffee"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
     plots.append(plot_weighted_boxplot([coffee_no, coffee_yes], [coffee_no_weights, coffee_yes_weights], ["No coffee", "Coffee"], "Asleep after (minutes)", "Coffee vs time to fall asleep"))
 
+    # tea vs time to fall asleep
     tea_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Tea"] == 1 and row["Asleep after (seconds)"] is not None]
     tea_yes_weights = [row["Weight"] for row in rows if row["Tea"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
     tea_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Tea"] == 0 and row["Asleep after (seconds)"] is not None]
     tea_no_weights = [row["Weight"] for row in rows if row["Tea"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
     plots.append(plot_weighted_boxplot([tea_no, tea_yes], [tea_no_weights, tea_yes_weights], ["No tea", "Tea"], "Asleep after (minutes)", "Tea vs time to fall asleep"))
 
-    plots.append(plot_weighted_scatter([row["Prev Sleep Quality"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Sleep quality previous day", "Sleep quality", "Sleep inertia / carryover effect", invert_x=True))
+    # scatter plots
+    plots.append(plot_weighted_scatter([row["Sleep Quality"] for row in rows], [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Sleep quality", "Alertness score", "Alertness vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Weather temperature (°C)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Weather temperature (°C)", "Sleep quality", "Weather temperature vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Ambient noise (dB)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient noise (dB)", "Sleep quality", "Ambient noise vs Sleep quality"))
+    plots.append(plot_weighted_scatter([row["Ambient light (lux)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient light (lux)", "Sleep quality", "Ambient light vs Sleep quality"))
+    
+    # moon phase plots
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis, circular=True, period=1.0))
+    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis, circular=True, period=1.0))
+
+    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Alertness score", "Alertness vs Time in bed"))
+
+    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time asleep (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time asleep (hours)", "Alertness score", "Alertness vs Time asleep"))
+
+    plots.append(plot_weighted_scatter([row["Prev Sleep Quality"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Sleep quality previous day", "Sleep quality", "Sleep inertia / carryover effect"))
 
     plots.append(plot_weighted_scatter([row["Regularity"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Regularity", "Sleep quality", "Sleep regularity vs Sleep quality"))
 
@@ -1071,11 +1080,13 @@ def plot_all(rows):
     plots.append(plot_alarm_time(rows))
     plots.append(plot_reliability_time_of_day([row["Wake up window stop"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Alarm time", "Sleep quality", "Alarm time vs Reliability"))
 
+    # airpressure vs sleep quality
     pressure = [row["Air Pressure (Pa)"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
     quality = [row["Sleep Quality"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
     pressure_weights = [row["Weight"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
     plots.append(plot_weighted_scatter(pressure, quality, pressure_weights, "Air pressure (Pa)", "Sleep quality", "Air pressure vs Sleep quality", bandwidth=BANDWIDTH_PRESSURE))
 
+    # mood vs sleep quality
     mood_bad = [row["Sleep Quality"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None]
     mood_bad_weights = [row["Weight"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None and row["Weight"] is not None]
     mood_ok = [row["Sleep Quality"] for row in rows if row.get("Mood") == 1 and row["Sleep Quality"] is not None]
@@ -1089,7 +1100,6 @@ def plot_all(rows):
 
 def run_analysis_prints(rows):
     DAY_SECONDS = 86400
-    BANDWIDTH = 45 * 60
 
     # Build alarm prediction columns for use in partial correlation controls
     def circ_dist(a, b):
@@ -1114,7 +1124,7 @@ def run_analysis_prints(rows):
 
     def predict_alarm_quality(t_query, exclude_index=None):
         dists = np.array([circ_dist(t_query, t) for t in alarm_times])
-        kernel = np.exp(-0.5 * (dists / BANDWIDTH) ** 2)
+        kernel = np.exp(-0.5 * (dists / BANDWIDTH_ALARM) ** 2)
         w = kernel * alarm_weights
         if exclude_index is not None:
             w[exclude_index] = 0
