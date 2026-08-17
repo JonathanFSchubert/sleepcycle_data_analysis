@@ -20,13 +20,6 @@ FIXED_BEDTIME = None           # e.g., "22:30" or "22:00 - 23:30" or 81000 (seco
 FIXED_ALARM_TIME = None        # e.g., "07:00" or "07:00 - 09:00" or 25200 (seconds) -> None to optimize
 FIXED_TIME_IN_BED_HOURS = None # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
 
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-FIG_SIZE = 20
-
-
 BANDWIDTH_DEFAULT = 0.3  # default multiplier for kernel bandwidth from data standard deviation
 BANDWIDTH_CIRCULAR_FACTOR = 0.3  # circular bandwidth factor for time-of-day kernels
 BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
@@ -42,6 +35,12 @@ BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
 
 # Half-life for weighting older data points (in days) when computing weighted correlations and predictions
 HALF_LIFE_DAYS = 365
+
+# other settings
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+FIG_SIZE = 20
 
 
 def yyyy_time_to_datetime(string):
@@ -63,7 +62,9 @@ def seconds_since_midnight(dt):
 
 
 def parse_time_to_seconds(time_input):
-    """Convert time input (string like '22:30' or int seconds) to seconds since midnight."""
+    """
+    Convert time input (string like '22:30' or int seconds) to seconds since midnight.
+    """
     if time_input is None:
         return None
     if isinstance(time_input, (int, float)):
@@ -169,14 +170,14 @@ def effective_sample_size(weights):
     return (w.sum() ** 2) / (np.sum(w**2))
 
 
-def shrink_correlation(corr, n_eff, k=1):
-    return corr * (n_eff / (n_eff + k))
-
-
 def weighted_mean(values, weights):
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
     return np.sum(values * weights) / np.sum(weights)
+
+
+def shrink_correlation(corr, n_eff, k=1):
+    return corr * (n_eff / (n_eff + k))
 
 
 def weighted_partial_correlation(rows, factor, result, control_columns):
@@ -223,14 +224,17 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
         y = r[result]
         w = r["Weight"]
         if x is None or y is None or w is None:
+            print("Error for x / y / w is None")
             continue
 
         controls = []
         for c in control_columns:
             v = r[c]
             if v is None:
+                print("Error with v = None")
                 v = control_means[c]
             if v is None:
+                print("even the fallback didnt work..")
                 break
             controls.append(v)
 
@@ -278,7 +282,9 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
 
     corr = num / den
     n_eff = effective_sample_size(w)
-    return float(shrink_correlation(corr, n_eff, k=1))
+    k = len(control_columns)
+
+    return float(shrink_correlation(corr, n_eff, k=k))
 
 
 def ensure_output_dir():
@@ -303,6 +309,7 @@ def weighted_quantile(values, weights, quantiles):
     weights = np.asarray(weights, dtype=float)
     mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
     if not np.any(mask):
+        print("Error with infinite value in weighted_quantile")
         return np.full(len(quantiles), np.nan)
 
     vals = values[mask]
@@ -337,6 +344,7 @@ def kernel_predict(x_query, x_vals, y_vals, weights, bandwidth):
     w = kernel * weights
 
     if w.sum() == 0:
+        print("Error with w.sum() == 0 in kernel_predict")
         return np.nan
 
     return np.sum(w * y_vals) / np.sum(w)
@@ -1178,18 +1186,21 @@ def run_analysis_prints(rows):
 
     control_columns = ["Alarm_quality_prediction", "Alarm set"]
 
+    # notes
     correlation_results_notes = {}
     for factor in factor_list_notes:
         rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
         correlation_results_notes[factor] = rho
     correlation_results_notes = {k: v for k, v in correlation_results_notes.items() if v is not None}
 
+    # weather
     correlation_results_weather = {}
     for factor in factor_list_weather:
         rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
         correlation_results_weather[factor] = rho
     correlation_results_weather = {k: v for k, v in correlation_results_weather.items() if v is not None}
 
+    # cities
     correlation_results_cities = {}
     for factor in factor_list_cities:
         rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
@@ -1230,6 +1241,7 @@ def run_analysis_prints(rows):
     for key, value in expected_effects_notes:
         lines.append(f"{key} -> {int(value.round()):+} %")
 
+    # wather
     expected_effects_weather = {}
     for factor, r in correlation_results_weather.items():
         factor_values = np.array([row[factor] for row in rows if row[factor] is not None])
@@ -1245,6 +1257,7 @@ def run_analysis_prints(rows):
     for key, value in expected_effects_weather:
         lines.append(f"{key} -> {int(value.round()):+} %")
 
+    # cities
     expected_effects_cities = {}
     for factor, r in correlation_results_cities.items():
         factor_values = np.array([row[factor] for row in rows if row[factor] is not None])
