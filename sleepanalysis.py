@@ -11,16 +11,29 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import statsmodels.api as sm
-
+from scipy import stats
 
 # Optional fixed sleep goal parameters (set to None to optimize, or provide a specific value/range)
 # For bedtime/alarm: time string like "22:30" (fixed) or "22:00 - 23:00" (range) or seconds (0-86400)
 # For time_in_bed: float hours like 8.0 (fixed) or "7.5 - 9.0" (range as string with hours)
-FIXED_BEDTIME = None           # e.g., "22:30" or "22:00 - 23:30" or 81000 (seconds) -> None to optimize
-FIXED_ALARM_TIME = None        # e.g., "07:00" or "07:00 - 09:00" or 25200 (seconds) -> None to optimize
-FIXED_TIME_IN_BED_HOURS = None # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
+FIXED_BEDTIME = (
+    None  # e.g., "22:30" or "22:00 - 23:30" or 81000 (seconds) -> None to optimize
+)
+FIXED_ALARM_TIME = (
+    None  # e.g., "07:00" or "07:00 - 09:00" or 25200 (seconds) -> None to optimize
+)
+FIXED_TIME_IN_BED_HOURS = None  # e.g., 8.0 or "7.5 - 9.0" -> None to optimize
 
-BANDWIDTH_DEFAULT = 0.3  # default multiplier for kernel bandwidth from data standard deviation
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+FIG_SIZE = 20
+
+
+BANDWIDTH_DEFAULT = (
+    0.3  # default multiplier for kernel bandwidth from data standard deviation
+)
 BANDWIDTH_CIRCULAR_FACTOR = 0.3  # circular bandwidth factor for time-of-day kernels
 BANDWIDTH_MIN = 1e-6  # minimum kernel bandwidth to avoid zero width
 BANDWIDTH_PRESSURE = 0.45
@@ -31,16 +44,10 @@ TOP_N_SLEEP_GOAL_CADIDATES = 5  # number of top sleep-goal candidates to return
 # Tunable parameters for reliability and shrinkage
 RELIABILITY_DENOM = 1.8  # denominator added to n_eff when computing reliability -> Increase to make reliabilities smaller (reduces trust in local data)
 GLOBAL_BIAS_DEFAULT = 0.15  # baseline weight when combining predictions -> Increase to make predictions move closer to the baseline when reliability is low
-BASELINE_PERCENTILE = 25    # percentile used as conservative baseline
+BASELINE_PERCENTILE = 25  # percentile used as conservative baseline
 
 # Half-life for weighting older data points (in days) when computing weighted correlations and predictions
-HALF_LIFE_DAYS = 365
-
-# other settings
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(SCRIPT_DIR, "sleepdata.csv")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-FIG_SIZE = 20
+HALF_LIFE_DAYS = 365 * 2
 
 
 def yyyy_time_to_datetime(string):
@@ -62,9 +69,7 @@ def seconds_since_midnight(dt):
 
 
 def parse_time_to_seconds(time_input):
-    """
-    Convert time input (string like '22:30' or int seconds) to seconds since midnight.
-    """
+    """Convert time input (string like '22:30' or int seconds) to seconds since midnight."""
     if time_input is None:
         return None
     if isinstance(time_input, (int, float)):
@@ -88,10 +93,10 @@ def parse_time_range(time_input):
     """
     if time_input is None:
         return None, None
-    
+
     if isinstance(time_input, (int, float)):
         return int(time_input), int(time_input)
-    
+
     if isinstance(time_input, str):
         # Check if it's a range (contains " - ")
         if " - " in time_input:
@@ -106,7 +111,7 @@ def parse_time_range(time_input):
             sec = parse_time_to_seconds(time_input.strip())
             if sec is not None:
                 return sec, sec
-    
+
     return None, None
 
 
@@ -121,10 +126,10 @@ def parse_tib_range(tib_input):
     """
     if tib_input is None:
         return None, None
-    
+
     if isinstance(tib_input, (int, float)):
         return float(tib_input), float(tib_input)
-    
+
     if isinstance(tib_input, str):
         # Check if it's a range (contains " - ")
         if " - " in tib_input:
@@ -143,7 +148,7 @@ def parse_tib_range(tib_input):
                 return val, val
             except ValueError:
                 pass
-    
+
     return None, None
 
 
@@ -170,22 +175,24 @@ def effective_sample_size(weights):
     return (w.sum() ** 2) / (np.sum(w**2))
 
 
+def shrink_correlation(corr, n_eff):
+    return corr * (n_eff / (n_eff + 1))
+
+
 def weighted_mean(values, weights):
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
     return np.sum(values * weights) / np.sum(weights)
 
 
-def shrink_correlation(corr, n_eff, k=1):
-    return corr * (n_eff / (n_eff + k))
-
-
 def weighted_partial_correlation(rows, factor, result, control_columns):
+    """
+    returns correlation value and p value
+    """
     first_appearance_index = find_first_appearance_of_factor(rows, factor)
     if first_appearance_index is None:
         print("Error: factor never appears!")
         return
-
 
     rows_relevant = rows
     """
@@ -243,17 +250,13 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
 
         data.append((x, y, controls, w))
 
-    if len(data) < 3:
-        print(f"Error: too little data for factor {factor}")
-        return None
-
     X_var = np.array([d[0] for d in data], dtype=float)
     Y_var = np.array([d[1] for d in data], dtype=float)
     Controls = np.array([d[2] for d in data], dtype=float)
-    w = np.array([d[3] for d in data], dtype=float)
+    weight = np.array([d[3] for d in data], dtype=float)
 
     Controls_const = sm.add_constant(Controls)
-    sw = np.sqrt(w)
+    sw = np.sqrt(weight)
     Xw = Controls_const * sw[:, None]
     X_var_w = X_var * sw
     Y_var_w = Y_var * sw
@@ -270,21 +273,30 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
     res_x = sm.RLM(X_var_w, Xw, M=sm.robust.norms.HuberT()).fit().resid
     res_y = sm.RLM(Y_var_w, Xw, M=sm.robust.norms.HuberT()).fit().resid
 
-    wsum = np.sum(w)
-    mx = np.sum(w * res_x) / wsum
-    my = np.sum(w * res_y) / wsum
+    wsum = np.sum(weight)
+    mx = np.sum(weight * res_x) / wsum
+    my = np.sum(weight * res_y) / wsum
 
-    num = np.sum(w * (res_x - mx) * (res_y - my))
-    den = np.sqrt(np.sum(w * (res_x - mx) ** 2) * np.sum(w * (res_y - my) ** 2))
+    num = np.sum(weight * (res_x - mx) * (res_y - my))
+    den = np.sqrt(
+        np.sum(weight * (res_x - mx) ** 2) * np.sum(weight * (res_y - my) ** 2)
+    )
     if den == 0:
         print(f"Error: denominator is 0 for Factor {factor}")
         return None
 
-    corr = num / den
-    n_eff = effective_sample_size(w)
-    k = len(control_columns)
+    correlation_value = num / den
+    n_eff = effective_sample_size(weight)
 
-    return float(shrink_correlation(corr, n_eff, k=k))
+    # calculate partial correlation p value
+    k = len(control_columns)
+    df = n_eff - k - 2
+    if df <= 0 or abs(correlation_value) >= 1:
+        return None
+    t = correlation_value * np.sqrt(df / (1 - correlation_value**2))
+    p = 2 * stats.t.sf(abs(t), df)
+
+    return float(shrink_correlation(correlation_value, n_eff)), p
 
 
 def ensure_output_dir():
@@ -351,7 +363,9 @@ def kernel_predict(x_query, x_vals, y_vals, weights, bandwidth):
 
 
 def kernel_smooth_curve(x_grid, x_vals, y_vals, weights, bandwidth):
-    return np.array([kernel_predict(x, x_vals, y_vals, weights, bandwidth) for x in x_grid])
+    return np.array(
+        [kernel_predict(x, x_vals, y_vals, weights, bandwidth) for x in x_grid]
+    )
 
 
 def circular_time_distance(a, b, period=86400):
@@ -368,7 +382,9 @@ def kernel_predict_circular(x_query, x_vals, y_vals, weights, bandwidth, period=
     return np.sum(w * y_vals) / np.sum(w)
 
 
-def kernel_reliability(x_query, x_vals, weights, bandwidth, circular=False, period=86400):
+def kernel_reliability(
+    x_query, x_vals, weights, bandwidth, circular=False, period=86400
+):
     x_vals = np.asarray(x_vals, dtype=float)
     weights = np.asarray(weights, dtype=float)
     mask = np.isfinite(x_vals) & np.isfinite(weights) & (weights > 0)
@@ -387,33 +403,46 @@ def kernel_reliability(x_query, x_vals, weights, bandwidth, circular=False, peri
     if w.sum() == 0:
         return 0.0
 
-    return float(effective_sample_size(w) / (effective_sample_size(w) + RELIABILITY_DENOM))
+    return float(
+        effective_sample_size(w) / (effective_sample_size(w) + RELIABILITY_DENOM)
+    )
 
 
-def kernel_smooth_curve_circular(x_grid, x_vals, y_vals, weights, bandwidth, period=86400):
-    return np.array([
-        kernel_predict_circular(x, x_vals, y_vals, weights, bandwidth, period)
-        for x in x_grid
-    ])
+def kernel_smooth_curve_circular(
+    x_grid, x_vals, y_vals, weights, bandwidth, period=86400
+):
+    return np.array(
+        [
+            kernel_predict_circular(x, x_vals, y_vals, weights, bandwidth, period)
+            for x in x_grid
+        ]
+    )
 
 
 def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth=None):
-    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+    x_arr, y_arr, w_arr = prepare_weighted_data(x, y, weights)
+
     if len(x_arr) == 0:
         return None
 
     x_arr = np.mod(x_arr, 86400)
     if bandwidth is None:
-        bandwidth = max(circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
+        bandwidth = max(
+            circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN
+        )
 
     grid = np.linspace(0, 86400, 300, endpoint=False)
-    reliabilities = [kernel_reliability(x, x_arr, w_arr, bandwidth, circular=True) for x in grid]
+    reliabilities = [
+        kernel_reliability(x, x_arr, w_arr, bandwidth, circular=True) for x in grid
+    ]
     quality_preds = kernel_smooth_curve_circular(grid, x_arr, y_arr, w_arr, bandwidth)
     # use a conservative baseline (lower quartile) so low-reliability predictions are pulled down
     try:
-        pct25 = float(np.nanpercentile(y_arr, BASELINE_PERCENTILE)) if len(y_arr) > 0 else float(np.nanmean(y_arr))
+        pct25 = (
+            float(np.nanpercentile(y_arr, BASELINE_PERCENTILE))
+            if len(y_arr) > 0
+            else float(np.nanmean(y_arr))
+        )
     except Exception:
         pct25 = float(np.nanmean(y_arr))
     try:
@@ -428,11 +457,21 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
         for pred, rel in zip(quality_preds, reliabilities)
     ]
 
-    plt.figure(figsize=(FIG_SIZE + 2, FIG_SIZE + 1))
+    plt.figure(figsize=(FIG_SIZE, FIG_SIZE))
     ax = plt.gca()
-    ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
+    ax.plot(
+        grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability"
+    )
     point_sizes = 100 * w_arr
-    ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
+    ax.scatter(
+        x_arr,
+        np.full_like(x_arr, 0.05),
+        s=point_sizes,
+        alpha=0.4,
+        color="gray",
+        edgecolors="none",
+        label="Data points",
+    )
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Reliability")
     ax.set_ylim(0, 1)
@@ -441,10 +480,22 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
     configure_time_of_day_axis(ax)
 
     ax2 = ax.twinx()
-    ax2.plot(grid, quality_preds, color="tab:orange", linewidth=2, linestyle="--", label="Raw quality")
-    ax2.plot(grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality")
+    ax2.plot(
+        grid,
+        quality_preds,
+        color="tab:orange",
+        linewidth=2,
+        linestyle="--",
+        label="Raw quality",
+    )
+    ax2.plot(
+        grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality"
+    )
     ax2.set_ylabel(ylabel)
-    ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
+    ax2.set_ylim(
+        min(0, np.nanmin(quality_effective) - 5),
+        max(100, np.nanmax(quality_effective) + 5),
+    )
 
     handles, labels = ax.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
@@ -454,9 +505,9 @@ def plot_reliability_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth
 
 
 def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
-    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+
+    x_arr, y_arr, w_arr = prepare_weighted_data(x, y, weights)
+
     if len(x_arr) == 0:
         return None
 
@@ -468,7 +519,11 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
     quality_preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
     # use GLOBAL_BIAS_DEFAULT to control shrinkage strength
     try:
-        pct25 = float(np.nanpercentile(y_arr, BASELINE_PERCENTILE)) if len(y_arr) > 0 else float(np.nanmean(y_arr))
+        pct25 = (
+            float(np.nanpercentile(y_arr, BASELINE_PERCENTILE))
+            if len(y_arr) > 0
+            else float(np.nanmean(y_arr))
+        )
     except Exception:
         pct25 = float(np.nanmean(y_arr))
     try:
@@ -481,11 +536,21 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
         for pred, rel in zip(quality_preds, reliabilities)
     ]
 
-    plt.figure(figsize=(FIG_SIZE + 1, FIG_SIZE))
+    plt.figure(figsize=(FIG_SIZE, FIG_SIZE))
     ax = plt.gca()
-    ax.plot(grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability")
+    ax.plot(
+        grid, reliabilities, color="tab:green", linewidth=2, label="Local reliability"
+    )
     point_sizes = 100 * w_arr
-    ax.scatter(x_arr, np.full_like(x_arr, 0.05), s=point_sizes, alpha=0.4, color="gray", edgecolors="none", label="Data points")
+    ax.scatter(
+        x_arr,
+        np.full_like(x_arr, 0.05),
+        s=point_sizes,
+        alpha=0.4,
+        color="gray",
+        edgecolors="none",
+        label="Data points",
+    )
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Reliability")
     ax.set_ylim(0, 1)
@@ -496,10 +561,22 @@ def plot_reliability_line(x, y, weights, xlabel, ylabel, title, bandwidth=None):
         ax.xaxis.set_minor_locator(ticker.MultipleLocator(0.25))
 
     ax2 = ax.twinx()
-    ax2.plot(grid, quality_preds, color="tab:orange", linewidth=2, linestyle="--", label="Raw quality")
-    ax2.plot(grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality")
+    ax2.plot(
+        grid,
+        quality_preds,
+        color="tab:orange",
+        linewidth=2,
+        linestyle="--",
+        label="Raw quality",
+    )
+    ax2.plot(
+        grid, quality_effective, color="tab:red", linewidth=2, label="Effective quality"
+    )
     ax2.set_ylabel(ylabel)
-    ax2.set_ylim(min(0, np.nanmin(quality_effective) - 5), max(100, np.nanmax(quality_effective) + 5))
+    ax2.set_ylim(
+        min(0, np.nanmin(quality_effective) - 5),
+        max(100, np.nanmax(quality_effective) + 5),
+    )
 
     handles, labels = ax.get_legend_handles_labels()
     handles2, labels2 = ax2.get_legend_handles_labels()
@@ -526,7 +603,9 @@ def save_plot(title):
     return path
 
 
-def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", control_columns=None):
+def compute_expected_effects(
+    rows, factor_names, result_column="Sleep Quality", control_columns=None
+):
     if control_columns is None:
         control_columns = []
     if not factor_names:
@@ -537,7 +616,9 @@ def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", 
 
     results = {}
     for factor in factor_names:
-        factor_values = np.array([row[factor] for row in rows if row.get(factor) is not None], dtype=float)
+        factor_values = np.array(
+            [row[factor] for row in rows if row.get(factor) is not None], dtype=float
+        )
         if len(factor_values) == 0:
             continue
 
@@ -546,13 +627,18 @@ def compute_expected_effects(rows, factor_names, result_column="Sleep Quality", 
             results[factor] = 0.0
             continue
 
-        corr = weighted_partial_correlation(rows=rows, factor=factor, result=result_column, control_columns=control_columns)
-        if corr is None:
+        corr_result = weighted_partial_correlation(
+            rows=rows,
+            factor=factor,
+            result=result_column,
+            control_columns=control_columns,
+        )
+        if corr_result is None:
             continue
+        rho, p_value = corr_result
+        results[factor] = rho * sigma_y / np.sqrt(p * (1.0 - p))
 
-        results[factor] = corr * sigma_y / np.sqrt(p * (1.0 - p))
-
-    return sorted(results.items(), key=lambda item: item[1], reverse=True)
+    return sorted(results.items(), key=lambda item: item[1][0], reverse=True)
 
 
 def format_seconds_to_24h_label(seconds):
@@ -573,7 +659,9 @@ def seconds_to_minutes(values):
 def configure_time_of_day_axis(ax):
     ax.xaxis.set_major_locator(ticker.MultipleLocator(3600))
     ax.xaxis.set_minor_locator(ticker.MultipleLocator(1800))
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda val, pos: format_seconds_to_24h_label(val)))
+    ax.xaxis.set_major_formatter(
+        ticker.FuncFormatter(lambda val, pos: format_seconds_to_24h_label(val))
+    )
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
 
@@ -604,10 +692,28 @@ def configure_moon_phase_axis(ax):
     ax.set_xlim(-0.01, 1.0)
 
 
-def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, bandwidth=None):
-    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+def prepare_weighted_data(x, y, weights):
+    data = [
+        (xi, yi, w)
+        for xi, yi, w in zip(x, y, weights)
+        if xi is not None and yi is not None and w is not None
+    ]
+
+    if not data:
+        return (
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+            np.array([], dtype=float),
+        )
+
+    x_arr, y_arr, w_arr = np.asarray(data, dtype=float).T
+    return x_arr, y_arr, w_arr
+
+
+def plot_weighted_scatter_time_of_day(
+    x, y, weights, xlabel, ylabel, title, bandwidth=None
+):
+    x_arr, y_arr, w_arr = prepare_weighted_data(x, y, weights)
 
     if len(x_arr) == 0:
         return None
@@ -615,12 +721,14 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, band
     x_arr = np.mod(x_arr, 86400)
 
     if bandwidth is None:
-        bandwidth = max(circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
+        bandwidth = max(
+            circular_time_bandwidth(x_arr) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN
+        )
 
     grid = np.linspace(0, 86400, 300, endpoint=False)
     preds = kernel_smooth_curve_circular(grid, x_arr, y_arr, w_arr, bandwidth)
 
-    plt.figure(figsize=(FIG_SIZE + 2, FIG_SIZE + 1))
+    plt.figure(figsize=(FIG_SIZE, FIG_SIZE))
     sizes = 100 * w_arr
     plt.scatter(x_arr, y_arr, s=sizes, alpha=0.6, color="tab:blue", edgecolors="none")
     plt.plot(grid, preds, color="red", linewidth=2, label="Weighted kernel smooth")
@@ -635,10 +743,20 @@ def plot_weighted_scatter_time_of_day(x, y, weights, xlabel, ylabel, title, band
     return save_plot(title)
 
 
-def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, bandwidth=None, postprocess_ax=None, circular=False, period=1.0):
-    x_arr = np.asarray([xi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    y_arr = np.asarray([yi for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
-    w_arr = np.asarray([w for xi, yi, w in zip(x, y, weights) if xi is not None and yi is not None and w is not None], dtype=float)
+def plot_weighted_scatter(
+    x,
+    y,
+    weights,
+    xlabel,
+    ylabel,
+    title,
+    bandwidth=None,
+    postprocess_ax=None,
+    circular=False,
+    period=1.0,
+):
+
+    x_arr, y_arr, w_arr = prepare_weighted_data(x, y, weights)
 
     if len(x_arr) == 0:
         return None
@@ -648,10 +766,12 @@ def plot_weighted_scatter(x, y, weights, xlabel, ylabel, title, bandwidth=None, 
 
     if circular:
         grid = np.linspace(0, period, 400, endpoint=False)
-        preds = np.array([
-            kernel_predict_circular(xq, x_arr, y_arr, w_arr, bandwidth, period)
-            for xq in grid
-        ])
+        preds = np.array(
+            [
+                kernel_predict_circular(xq, x_arr, y_arr, w_arr, bandwidth, period)
+                for xq in grid
+            ]
+        )
     else:
         grid = np.linspace(x_arr.min(), x_arr.max(), 300)
         preds = kernel_smooth_curve(grid, x_arr, y_arr, w_arr, bandwidth)
@@ -686,14 +806,16 @@ def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title):
         mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
 
         if not np.any(mask):
-            stats.append({
-                "med": np.nan,
-                "q1": np.nan,
-                "q3": np.nan,
-                "whislo": np.nan,
-                "whishi": np.nan,
-                "fliers": [],
-            })
+            stats.append(
+                {
+                    "med": np.nan,
+                    "q1": np.nan,
+                    "q3": np.nan,
+                    "whislo": np.nan,
+                    "whishi": np.nan,
+                    "fliers": [],
+                }
+            )
             continue
 
         vals = values[mask]
@@ -718,14 +840,16 @@ def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title):
 
         fliers = vals[(vals < low_limit) | (vals > high_limit)].tolist()
 
-        stats.append({
-            "med": med,
-            "q1": q1,
-            "q3": q3,
-            "whislo": whislo,
-            "whishi": whishi,
-            "fliers": fliers,
-        })
+        stats.append(
+            {
+                "med": med,
+                "q1": q1,
+                "q3": q3,
+                "whislo": whislo,
+                "whishi": whishi,
+                "fliers": fliers,
+            }
+        )
 
     ax.bxp(stats, positions=positions, showfliers=False, widths=0.6, patch_artist=True)
 
@@ -738,7 +862,9 @@ def plot_weighted_boxplot(group_values, group_weights, labels, ylabel, title):
 
         x_jitter = np.random.normal(i, 0.08, size=mask.sum())
         sizes = 100 * weights[mask]
-        ax.scatter(x_jitter, values[mask], s=sizes, alpha=0.5, color="gray", edgecolors="none")
+        ax.scatter(
+            x_jitter, values[mask], s=sizes, alpha=0.5, color="gray", edgecolors="none"
+        )
 
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
@@ -785,10 +911,19 @@ def plot_alarm_time(rows, bandwidth=BANDWIDTH_ALARM):
     )
 
 
-def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hours=12.0, step_minutes=5, fixed_bedtime=None, fixed_alarm_time=None, fixed_time_in_bed_hours=None, top_n=TOP_N_SLEEP_GOAL_CADIDATES):
+def compute_best_sleep_goal(
+    rows,
+    time_in_bed_min_hours=5.0,
+    time_in_bed_max_hours=12.0,
+    step_minutes=5,
+    fixed_bedtime=None,
+    fixed_alarm_time=None,
+    fixed_time_in_bed_hours=None,
+    top_n=TOP_N_SLEEP_GOAL_CADIDATES,
+):
     """
     Compute sleep-goal candidates by optimizing over bedtime, alarm time, and time in bed.
-    
+
     Parameters:
     - rows: list of sleep data rows
     - time_in_bed_min_hours: minimum time in bed to consider (hours)
@@ -798,32 +933,124 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     - fixed_alarm_time: if provided (in seconds), use this alarm time and optimize the other two parameters
     - fixed_time_in_bed_hours: if provided (in hours), use this time in bed and optimize the other two parameters
     - top_n: number of highest-scoring candidates to return
-    
+
     Returns: list of dicts with alarm_time, bedtime, time_in_bed_hours, predicted_quality
     """
     # Prepare predictors (x values, y quality, weights)
-    bed_x = np.array([r["Went to bed"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    bed_y = np.array([r["Sleep Quality"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    bed_w = np.array([r["Weight"] for r in rows if r["Went to bed"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    bed_x = np.array(
+        [
+            r["Went to bed"]
+            for r in rows
+            if r["Went to bed"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    bed_y = np.array(
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Went to bed"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    bed_w = np.array(
+        [
+            r["Weight"]
+            for r in rows
+            if r["Went to bed"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
 
-    alarm_x = np.array([r["Wake up window stop"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    alarm_y = np.array([r["Sleep Quality"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    alarm_w = np.array([r["Weight"] for r in rows if r["Wake up window stop"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    alarm_x = np.array(
+        [
+            r["Wake up window stop"]
+            for r in rows
+            if r["Wake up window stop"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    alarm_y = np.array(
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Wake up window stop"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    alarm_w = np.array(
+        [
+            r["Weight"]
+            for r in rows
+            if r["Wake up window stop"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
 
-    tib_x = np.array([r["Time in bed (seconds)"] / 3600.0 for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    tib_y = np.array([r["Sleep Quality"] for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
-    tib_w = np.array([r["Weight"] for r in rows if r["Time in bed (seconds)"] is not None and r["Sleep Quality"] is not None and r["Weight"] is not None], dtype=float)
+    tib_x = np.array(
+        [
+            r["Time in bed (seconds)"] / 3600.0
+            for r in rows
+            if r["Time in bed (seconds)"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    tib_y = np.array(
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Time in bed (seconds)"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
+    tib_w = np.array(
+        [
+            r["Weight"]
+            for r in rows
+            if r["Time in bed (seconds)"] is not None
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        dtype=float,
+    )
 
     # Fallback means
-    global_mean = np.mean([r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None]) if any(r["Sleep Quality"] is not None for r in rows) else 0
+    global_mean = (
+        np.mean([r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None])
+        if any(r["Sleep Quality"] is not None for r in rows)
+        else 0
+    )
     try:
-        global_baseline = float(np.nanpercentile([r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None], BASELINE_PERCENTILE))
+        global_baseline = float(
+            np.nanpercentile(
+                [r["Sleep Quality"] for r in rows if r["Sleep Quality"] is not None],
+                BASELINE_PERCENTILE,
+            )
+        )
     except Exception:
         global_baseline = global_mean
 
     # Bandwidths
     if len(bed_x) > 0:
-        bed_bw = max(circular_time_bandwidth(bed_x) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN)
+        bed_bw = max(
+            circular_time_bandwidth(bed_x) * BANDWIDTH_CIRCULAR_FACTOR, BANDWIDTH_MIN
+        )
     else:
         bed_bw = BANDWIDTH_ALARM
     if len(alarm_x) > 0:
@@ -840,9 +1067,11 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
         if not np.any(mask):
             return 0.0
         w = np.asarray(weights, dtype=float)[mask]
-        return float((w.sum() ** 2) / np.sum(w ** 2))
+        return float((w.sum() ** 2) / np.sum(w**2))
 
-    def predict_with_reliability(query, x_vals, y_vals, weights, bandwidth, circular=False):
+    def predict_with_reliability(
+        query, x_vals, y_vals, weights, bandwidth, circular=False
+    ):
         if len(x_vals) == 0:
             return np.nan, 0.0
 
@@ -868,7 +1097,9 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     step_sec = int(step_minutes * 60)
     alarm_candidates = np.arange(0, 86400, step_sec, dtype=int)
     tib_step = step_minutes / 60.0
-    tib_candidates = np.arange(time_in_bed_min_hours, time_in_bed_max_hours + tib_step / 2.0, tib_step)
+    tib_candidates = np.arange(
+        time_in_bed_min_hours, time_in_bed_max_hours + tib_step / 2.0, tib_step
+    )
 
     # Parse parameter ranges
     bedtime_min, bedtime_max = parse_time_range(fixed_bedtime)
@@ -877,10 +1108,14 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
 
     # Apply range constraints to candidates
     if alarm_min is not None and alarm_max is not None:
-        alarm_candidates = alarm_candidates[(alarm_candidates >= alarm_min) & (alarm_candidates <= alarm_max)]
-    
+        alarm_candidates = alarm_candidates[
+            (alarm_candidates >= alarm_min) & (alarm_candidates <= alarm_max)
+        ]
+
     if tib_min_fixed is not None and tib_max_fixed is not None:
-        tib_candidates = tib_candidates[(tib_candidates >= tib_min_fixed) & (tib_candidates <= tib_max_fixed)]
+        tib_candidates = tib_candidates[
+            (tib_candidates >= tib_min_fixed) & (tib_candidates <= tib_max_fixed)
+        ]
 
     candidates = []
 
@@ -888,7 +1123,7 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
     for tib in tib_candidates:
         for at in alarm_candidates:
             bedtime = (at - int(tib * 3600)) % 86400
-            
+
             # Check bedtime constraint if specified
             if bedtime_min is not None and bedtime_max is not None:
                 if bedtime_min <= bedtime_max:
@@ -900,19 +1135,50 @@ def compute_best_sleep_goal(rows, time_in_bed_min_hours=5.0, time_in_bed_max_hou
                     if not (bedtime >= bedtime_min or bedtime <= bedtime_max):
                         continue
 
-            q_bed, rel_bed = predict_with_reliability(bedtime, bed_x, bed_y, bed_w, bed_bw, circular=True)
-            q_alarm, rel_alarm = predict_with_reliability(at, alarm_x, alarm_y, alarm_w, alarm_bw, circular=True)
+            q_bed, rel_bed = predict_with_reliability(
+                bedtime, bed_x, bed_y, bed_w, bed_bw, circular=True
+            )
+            q_alarm, rel_alarm = predict_with_reliability(
+                at, alarm_x, alarm_y, alarm_w, alarm_bw, circular=True
+            )
             q_tib, rel_tib = predict_with_reliability(tib, tib_x, tib_y, tib_w, tib_bw)
 
-            eff_bed = (q_bed * rel_bed + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_bed + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_bed) else global_baseline
-            eff_alarm = (q_alarm * rel_alarm + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_alarm + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_alarm) else global_baseline
-            eff_tib = (q_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT) / (rel_tib + GLOBAL_BIAS_DEFAULT) if not np.isnan(q_tib) else global_baseline
+            eff_bed = (
+                (q_bed * rel_bed + global_baseline * GLOBAL_BIAS_DEFAULT)
+                / (rel_bed + GLOBAL_BIAS_DEFAULT)
+                if not np.isnan(q_bed)
+                else global_baseline
+            )
+            eff_alarm = (
+                (q_alarm * rel_alarm + global_baseline * GLOBAL_BIAS_DEFAULT)
+                / (rel_alarm + GLOBAL_BIAS_DEFAULT)
+                if not np.isnan(q_alarm)
+                else global_baseline
+            )
+            eff_tib = (
+                (q_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT)
+                / (rel_tib + GLOBAL_BIAS_DEFAULT)
+                if not np.isnan(q_tib)
+                else global_baseline
+            )
 
             total_reliability = rel_bed + rel_alarm + rel_tib
             total_weight = total_reliability + GLOBAL_BIAS_DEFAULT
-            score = (eff_bed * rel_bed + eff_alarm * rel_alarm + eff_tib * rel_tib + global_baseline * GLOBAL_BIAS_DEFAULT) / total_weight
+            score = (
+                eff_bed * rel_bed
+                + eff_alarm * rel_alarm
+                + eff_tib * rel_tib
+                + global_baseline * GLOBAL_BIAS_DEFAULT
+            ) / total_weight
 
-            candidates.append({"alarm_time": int(at), "bedtime": int(bedtime), "time_in_bed_hours": float(tib), "predicted_quality": float(score)})
+            candidates.append(
+                {
+                    "alarm_time": int(at),
+                    "bedtime": int(bedtime),
+                    "time_in_bed_hours": float(tib),
+                    "predicted_quality": float(score),
+                }
+            )
 
     candidates.sort(key=lambda item: item["predicted_quality"], reverse=True)
     return candidates[: max(1, int(top_n))]
@@ -928,30 +1194,70 @@ def load_rows():
     for row in rows:
         row["Went to bed"] = yyyy_time_to_datetime(row.get("Went to bed", ""))
         row["Woke up"] = yyyy_time_to_datetime(row.get("Woke up", ""))
-        row["Wake up window start"] = yy_time_to_datetime(row.get("Wake up window start", ""))
-        row["Wake up window stop"] = yy_time_to_datetime(row.get("Wake up window stop", ""))
+        row["Wake up window start"] = yy_time_to_datetime(
+            row.get("Wake up window start", "")
+        )
+        row["Wake up window stop"] = yy_time_to_datetime(
+            row.get("Wake up window stop", "")
+        )
 
-        row["Sleep Quality"] = int(row["Sleep Quality"].rstrip("%")) if row.get("Sleep Quality") else None
-        row["Time in bed (seconds)"] = int(row["Time in bed (seconds)"]) if row.get("Time in bed (seconds)") else None
-        row["Time asleep (seconds)"] = int(row["Time asleep (seconds)"]) if row.get("Time asleep (seconds)") else None
-        row["Asleep after (seconds)"] = int(row["Asleep after (seconds)"]) if row.get("Asleep after (seconds)") else None
-        row["Snore time (seconds)"] = int(row["Snore time (seconds)"]) if row.get("Snore time (seconds)") else None
+        row["Sleep Quality"] = (
+            int(row["Sleep Quality"].rstrip("%")) if row.get("Sleep Quality") else None
+        )
+        row["Time in bed (seconds)"] = (
+            int(row["Time in bed (seconds)"])
+            if row.get("Time in bed (seconds)")
+            else None
+        )
+        row["Time asleep (seconds)"] = (
+            int(row["Time asleep (seconds)"])
+            if row.get("Time asleep (seconds)")
+            else None
+        )
+        row["Asleep after (seconds)"] = (
+            int(row["Asleep after (seconds)"])
+            if row.get("Asleep after (seconds)")
+            else None
+        )
+        row["Snore time (seconds)"] = (
+            int(row["Snore time (seconds)"])
+            if row.get("Snore time (seconds)")
+            else None
+        )
         row["Steps"] = int(row["Steps"]) if row.get("Steps") else None
-        row["Weather temperature (°C)"] = int(row["Weather temperature (°C)"]) if row.get("Weather temperature (°C)") else None
-        row["Alertness score"] = int(row["Alertness score"].rstrip("%")) if row.get("Alertness score") else None
-        row["Alertness accuracy"] = int(row["Alertness accuracy"].rstrip("%")) if row.get("Alertness accuracy") else None
+        row["Weather temperature (°C)"] = (
+            int(row["Weather temperature (°C)"])
+            if row.get("Weather temperature (°C)")
+            else None
+        )
+        row["Alertness score"] = (
+            int(row["Alertness score"].rstrip("%"))
+            if row.get("Alertness score")
+            else None
+        )
+        row["Alertness accuracy"] = (
+            int(row["Alertness accuracy"].rstrip("%"))
+            if row.get("Alertness accuracy")
+            else None
+        )
 
         row["Regularity"] = parse_float(row.get("Regularity", ""))
         row["Coughing (per hour)"] = parse_float(row.get("Coughing (per hour)", ""))
         row["Air Pressure (Pa)"] = parse_float(row.get("Air Pressure (Pa)", ""))
-        row["Breathing disruptions (per hour)"] = parse_float(row.get("Breathing disruptions (per hour)", ""))
+        row["Breathing disruptions (per hour)"] = parse_float(
+            row.get("Breathing disruptions (per hour)", "")
+        )
         row["Ambient noise (dB)"] = parse_float(row.get("Ambient noise (dB)", ""))
         row["Ambient light (lux)"] = parse_float(row.get("Ambient light (lux)", ""))
-        row["Alertness reaction time (seconds)"] = parse_float(row.get("Alertness reaction time (seconds)", ""))
+        row["Alertness reaction time (seconds)"] = parse_float(
+            row.get("Alertness reaction time (seconds)", "")
+        )
         row["Movements per hour"] = parse_float(row.get("Movements per hour", ""))
 
         did_snore = row.get("Did snore", "")
-        row["Did snore"] = None if did_snore == "" else (1 if did_snore == "true" else 0)
+        row["Did snore"] = (
+            None if did_snore == "" else (1 if did_snore == "true" else 0)
+        )
 
         notes_value = row.get("Notes", "")
         row["Notes"] = [] if notes_value == "" else notes_value.split(":")
@@ -969,7 +1275,9 @@ def load_rows():
                 row["Mood"] = mood_mapping.get(mood_text, None)
 
     for index, row in enumerate(rows):
-        row["Prev Sleep Quality"] = rows[index - 1]["Sleep Quality"] if index > 0 else None
+        row["Prev Sleep Quality"] = (
+            rows[index - 1]["Sleep Quality"] if index > 0 else None
+        )
 
     valid_woke = [row["Woke up"] for row in rows if row["Woke up"] is not None]
     latest_date = max(valid_woke) if valid_woke else None
@@ -1015,11 +1323,21 @@ def load_rows():
         row["Tea"] = 1 if "Tea" in row["Notes"] else 0
 
     global unique_weather_types, unique_cities, unique_notes
-    unique_weather_types = sorted({row["Weather type"] for row in rows if row["Weather type"] is not None})
+    unique_weather_types = sorted(
+        {row["Weather type"] for row in rows if row["Weather type"] is not None}
+    )
     unique_cities = sorted({row["City"] for row in rows if row["City"] is not None})
     unique_notes = sorted({note for row in rows for note in row["Notes"]})
 
-    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    weekday_names = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
     for row in rows:
         for note in unique_notes:
             row[f"Note {note}"] = 1 if note in row["Notes"] else 0
@@ -1037,71 +1355,380 @@ def plot_all(rows):
     plots = []
 
     # sleep drug vs time to fall asleep
-    sleep_drug_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None]
-    sleep_drug_yes_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    sleep_drug_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None]
-    sleep_drug_no_weights = [row["Weight"] for row in rows if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_boxplot([sleep_drug_no, sleep_drug_yes], [sleep_drug_no_weights, sleep_drug_yes_weights], ["No sleep drug", "Sleep drug"], "Asleep after (minutes)", "Sleep drug vs time to fall asleep"))
+    sleep_drug_yes = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Sleep drug"] == 1 and row["Asleep after (seconds)"] is not None
+    ]
+    sleep_drug_yes_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Sleep drug"] == 1
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    sleep_drug_no = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Sleep drug"] == 0 and row["Asleep after (seconds)"] is not None
+    ]
+    sleep_drug_no_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Sleep drug"] == 0
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    plots.append(
+        plot_weighted_boxplot(
+            [sleep_drug_no, sleep_drug_yes],
+            [sleep_drug_no_weights, sleep_drug_yes_weights],
+            ["No sleep drug", "Sleep drug"],
+            "Asleep after (minutes)",
+            "Sleep drug vs time to fall asleep",
+        )
+    )
 
     # coffee vs time to fall asleep
-    coffee_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Coffee"] == 1 and row["Asleep after (seconds)"] is not None]
-    coffee_yes_weights = [row["Weight"] for row in rows if row["Coffee"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    coffee_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Coffee"] == 0 and row["Asleep after (seconds)"] is not None]
-    coffee_no_weights = [row["Weight"] for row in rows if row["Coffee"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_boxplot([coffee_no, coffee_yes], [coffee_no_weights, coffee_yes_weights], ["No coffee", "Coffee"], "Asleep after (minutes)", "Coffee vs time to fall asleep"))
+    coffee_yes = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Coffee"] == 1 and row["Asleep after (seconds)"] is not None
+    ]
+    coffee_yes_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Coffee"] == 1
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    coffee_no = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Coffee"] == 0 and row["Asleep after (seconds)"] is not None
+    ]
+    coffee_no_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Coffee"] == 0
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    plots.append(
+        plot_weighted_boxplot(
+            [coffee_no, coffee_yes],
+            [coffee_no_weights, coffee_yes_weights],
+            ["No coffee", "Coffee"],
+            "Asleep after (minutes)",
+            "Coffee vs time to fall asleep",
+        )
+    )
 
     # tea vs time to fall asleep
-    tea_yes = [row["Asleep after (seconds)"] / 60 for row in rows if row["Tea"] == 1 and row["Asleep after (seconds)"] is not None]
-    tea_yes_weights = [row["Weight"] for row in rows if row["Tea"] == 1 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    tea_no = [row["Asleep after (seconds)"] / 60 for row in rows if row["Tea"] == 0 and row["Asleep after (seconds)"] is not None]
-    tea_no_weights = [row["Weight"] for row in rows if row["Tea"] == 0 and row["Asleep after (seconds)"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_boxplot([tea_no, tea_yes], [tea_no_weights, tea_yes_weights], ["No tea", "Tea"], "Asleep after (minutes)", "Tea vs time to fall asleep"))
+    tea_yes = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Tea"] == 1 and row["Asleep after (seconds)"] is not None
+    ]
+    tea_yes_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Tea"] == 1
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    tea_no = [
+        row["Asleep after (seconds)"] / 60
+        for row in rows
+        if row["Tea"] == 0 and row["Asleep after (seconds)"] is not None
+    ]
+    tea_no_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Tea"] == 0
+        and row["Asleep after (seconds)"] is not None
+        and row["Weight"] is not None
+    ]
+    plots.append(
+        plot_weighted_boxplot(
+            [tea_no, tea_yes],
+            [tea_no_weights, tea_yes_weights],
+            ["No tea", "Tea"],
+            "Asleep after (minutes)",
+            "Tea vs time to fall asleep",
+        )
+    )
 
     # scatter plots
-    plots.append(plot_weighted_scatter([row["Sleep Quality"] for row in rows], [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Sleep quality", "Alertness score", "Alertness vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Weather temperature (°C)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Weather temperature (°C)", "Sleep quality", "Weather temperature vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Ambient noise (dB)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient noise (dB)", "Sleep quality", "Ambient noise vs Sleep quality"))
-    plots.append(plot_weighted_scatter([row["Ambient light (lux)"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Ambient light (lux)", "Sleep quality", "Ambient light vs Sleep quality"))
-    
+    plots.append(
+        plot_weighted_scatter(
+            [row["Sleep Quality"] for row in rows],
+            [row["Alertness score"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Sleep quality",
+            "Alertness score",
+            "Alertness vs Sleep quality",
+        )
+    )
+    plots.append(
+        plot_weighted_scatter(
+            [row["Weather temperature (°C)"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Weather temperature (°C)",
+            "Sleep quality",
+            "Weather temperature vs Sleep quality",
+        )
+    )
+    plots.append(
+        plot_weighted_scatter(
+            [row["Ambient noise (dB)"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Ambient noise (dB)",
+            "Sleep quality",
+            "Ambient noise vs Sleep quality",
+        )
+    )
+    plots.append(
+        plot_weighted_scatter(
+            [row["Ambient light (lux)"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Ambient light (lux)",
+            "Sleep quality",
+            "Ambient light vs Sleep quality",
+        )
+    )
+
     # moon phase plots
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Sleep quality", "Moon phase vs Sleep quality", postprocess_ax=configure_moon_phase_axis, circular=True, period=1.0))
-    plots.append(plot_weighted_scatter([row["Moon phase"] for row in rows], [row["Ambient light (lux)"] for row in rows], [row["Weight"] for row in rows], "Moon phase", "Ambient light (lux)", "Moon phase vs Ambient light", postprocess_ax=configure_moon_phase_axis, circular=True, period=1.0))
+    plots.append(
+        plot_weighted_scatter(
+            [row["Moon phase"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Moon phase",
+            "Sleep quality",
+            "Moon phase vs Sleep quality",
+            postprocess_ax=configure_moon_phase_axis,
+            circular=True,
+            period=1.0,
+        )
+    )
+    plots.append(
+        plot_weighted_scatter(
+            [row["Moon phase"] for row in rows],
+            [row["Ambient light (lux)"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Moon phase",
+            "Ambient light (lux)",
+            "Moon phase vs Ambient light",
+            postprocess_ax=configure_moon_phase_axis,
+            circular=True,
+            period=1.0,
+        )
+    )
 
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Alertness score", "Alertness vs Time in bed"))
+    plots.append(
+        plot_weighted_scatter(
+            seconds_to_hours([row["Time in bed (seconds)"] for row in rows]),
+            [row["Alertness score"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Time in bed (hours)",
+            "Alertness score",
+            "Alertness vs Time in bed",
+        )
+    )
 
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time asleep (seconds)"] for row in rows]), [row["Alertness score"] for row in rows], [row["Weight"] for row in rows], "Time asleep (hours)", "Alertness score", "Alertness vs Time asleep"))
+    plots.append(
+        plot_weighted_scatter(
+            seconds_to_hours([row["Time asleep (seconds)"] for row in rows]),
+            [row["Alertness score"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Time asleep (hours)",
+            "Alertness score",
+            "Alertness vs Time asleep",
+        )
+    )
 
-    plots.append(plot_weighted_scatter([row["Prev Sleep Quality"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Sleep quality previous day", "Sleep quality", "Sleep inertia / carryover effect"))
+    plots.append(
+        plot_weighted_scatter(
+            [row["Prev Sleep Quality"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Sleep quality previous day",
+            "Sleep quality",
+            "Sleep inertia / carryover effect",
+        )
+    )
 
-    plots.append(plot_weighted_scatter([row["Regularity"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Regularity", "Sleep quality", "Sleep regularity vs Sleep quality"))
+    plots.append(
+        plot_weighted_scatter(
+            [row["Regularity"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Regularity",
+            "Sleep quality",
+            "Sleep regularity vs Sleep quality",
+        )
+    )
 
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Sleep quality", "Time in bed vs Sleep quality"))
-    plots.append(plot_reliability_line(seconds_to_hours([row["Time in bed (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time in bed (hours)", "Sleep quality", "Time in bed vs Reliability"))
+    plots.append(
+        plot_weighted_scatter(
+            seconds_to_hours([row["Time in bed (seconds)"] for row in rows]),
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Time in bed (hours)",
+            "Sleep quality",
+            "Time in bed vs Sleep quality",
+        )
+    )
+    plots.append(
+        plot_reliability_line(
+            seconds_to_hours([row["Time in bed (seconds)"] for row in rows]),
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Time in bed (hours)",
+            "Sleep quality",
+            "Time in bed vs Reliability",
+        )
+    )
 
-    plots.append(plot_weighted_scatter(seconds_to_hours([row["Time asleep (seconds)"] for row in rows]), [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Time asleep (hours)", "Sleep quality", "Time asleep vs Sleep quality"))
+    plots.append(
+        plot_weighted_scatter(
+            seconds_to_hours([row["Time asleep (seconds)"] for row in rows]),
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Time asleep (hours)",
+            "Sleep quality",
+            "Time asleep vs Sleep quality",
+        )
+    )
 
-    plots.append(plot_weighted_scatter_time_of_day([row["Went to bed"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Bedtime", "Sleep quality", "Bedtime vs Sleep quality"))
-    plots.append(plot_reliability_time_of_day([row["Went to bed"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Bedtime", "Sleep quality", "Bedtime vs Reliability"))
+    plots.append(
+        plot_weighted_scatter_time_of_day(
+            [row["Went to bed"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Bedtime",
+            "Sleep quality",
+            "Bedtime vs Sleep quality",
+        )
+    )
+    plots.append(
+        plot_reliability_time_of_day(
+            [row["Went to bed"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Bedtime",
+            "Sleep quality",
+            "Bedtime vs Reliability",
+        )
+    )
 
-    plots.append(plot_weighted_scatter_time_of_day([row["Went to bed"] for row in rows], seconds_to_minutes([row["Asleep after (seconds)" ] for row in rows]), [row["Weight"] for row in rows], "Bedtime", "Time to fall asleep (minutes)", "Bedtime vs Time to fall asleep"))
+    plots.append(
+        plot_weighted_scatter_time_of_day(
+            [row["Went to bed"] for row in rows],
+            seconds_to_minutes([row["Asleep after (seconds)"] for row in rows]),
+            [row["Weight"] for row in rows],
+            "Bedtime",
+            "Time to fall asleep (minutes)",
+            "Bedtime vs Time to fall asleep",
+        )
+    )
 
     plots.append(plot_alarm_time(rows))
-    plots.append(plot_reliability_time_of_day([row["Wake up window stop"] for row in rows], [row["Sleep Quality"] for row in rows], [row["Weight"] for row in rows], "Alarm time", "Sleep quality", "Alarm time vs Reliability"))
+    plots.append(
+        plot_reliability_time_of_day(
+            [row["Wake up window stop"] for row in rows],
+            [row["Sleep Quality"] for row in rows],
+            [row["Weight"] for row in rows],
+            "Alarm time",
+            "Sleep quality",
+            "Alarm time vs Reliability",
+        )
+    )
 
     # airpressure vs sleep quality
-    pressure = [row["Air Pressure (Pa)"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    quality = [row["Sleep Quality"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    pressure_weights = [row["Weight"] for row in rows if row["Air Pressure (Pa)"] is not None and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_scatter(pressure, quality, pressure_weights, "Air pressure (Pa)", "Sleep quality", "Air pressure vs Sleep quality", bandwidth=BANDWIDTH_PRESSURE))
+    pressure = [
+        row["Air Pressure (Pa)"]
+        for row in rows
+        if row["Air Pressure (Pa)"] is not None
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    quality = [
+        row["Sleep Quality"]
+        for row in rows
+        if row["Air Pressure (Pa)"] is not None
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    pressure_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Air Pressure (Pa)"] is not None
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    plots.append(
+        plot_weighted_scatter(
+            pressure,
+            quality,
+            pressure_weights,
+            "Air pressure (Pa)",
+            "Sleep quality",
+            "Air pressure vs Sleep quality",
+            bandwidth=BANDWIDTH_PRESSURE,
+        )
+    )
 
     # mood vs sleep quality
-    mood_bad = [row["Sleep Quality"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None]
-    mood_bad_weights = [row["Weight"] for row in rows if row.get("Mood") == 0 and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    mood_ok = [row["Sleep Quality"] for row in rows if row.get("Mood") == 1 and row["Sleep Quality"] is not None]
-    mood_ok_weights = [row["Weight"] for row in rows if row.get("Mood") == 1 and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    mood_good = [row["Sleep Quality"] for row in rows if row.get("Mood") == 2 and row["Sleep Quality"] is not None]
-    mood_good_weights = [row["Weight"] for row in rows if row.get("Mood") == 2 and row["Sleep Quality"] is not None and row["Weight"] is not None]
-    plots.append(plot_weighted_boxplot([mood_bad, mood_ok, mood_good], [mood_bad_weights, mood_ok_weights, mood_good_weights], ["Bad", "OK", "Good"], "Sleep quality", "Mood vs Sleep quality"))
+    mood_bad = [
+        row["Sleep Quality"]
+        for row in rows
+        if row.get("Mood") == 0 and row["Sleep Quality"] is not None
+    ]
+    mood_bad_weights = [
+        row["Weight"]
+        for row in rows
+        if row.get("Mood") == 0
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    mood_ok = [
+        row["Sleep Quality"]
+        for row in rows
+        if row.get("Mood") == 1 and row["Sleep Quality"] is not None
+    ]
+    mood_ok_weights = [
+        row["Weight"]
+        for row in rows
+        if row.get("Mood") == 1
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    mood_good = [
+        row["Sleep Quality"]
+        for row in rows
+        if row.get("Mood") == 2 and row["Sleep Quality"] is not None
+    ]
+    mood_good_weights = [
+        row["Weight"]
+        for row in rows
+        if row.get("Mood") == 2
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    plots.append(
+        plot_weighted_boxplot(
+            [mood_bad, mood_ok, mood_good],
+            [mood_bad_weights, mood_ok_weights, mood_good_weights],
+            ["Bad", "OK", "Good"],
+            "Sleep quality",
+            "Mood vs Sleep quality",
+        )
+    )
 
     return plots
 
@@ -1143,12 +1770,16 @@ def run_analysis_prints(rows):
     no_alarm_vals = [
         r["Sleep Quality"] * r["Weight"]
         for r in rows
-        if r["Wake up window stop"] is None and r["Sleep Quality"] is not None and r["Weight"] is not None
+        if r["Wake up window stop"] is None
+        and r["Sleep Quality"] is not None
+        and r["Weight"] is not None
     ]
     no_alarm_w = [
         r["Weight"]
         for r in rows
-        if r["Wake up window stop"] is None and r["Sleep Quality"] is not None and r["Weight"] is not None
+        if r["Wake up window stop"] is None
+        and r["Sleep Quality"] is not None
+        and r["Weight"] is not None
     ]
     if len(no_alarm_vals) > 0:
         no_alarm_mean = sum(no_alarm_vals) / sum(no_alarm_w)
@@ -1181,7 +1812,9 @@ def run_analysis_prints(rows):
     factor_list += [f"City {city}" for city in unique_cities]
 
     factor_list_notes = [f"Note {note}" for note in unique_notes]
-    factor_list_weather = [f"Weather type {weather}" for weather in unique_weather_types]
+    factor_list_weather = [
+        f"Weather type {weather}" for weather in unique_weather_types
+    ]
     factor_list_cities = [f"City {city}" for city in unique_cities]
 
     control_columns = ["Alarm_quality_prediction", "Alarm set"]
@@ -1189,43 +1822,80 @@ def run_analysis_prints(rows):
     # notes
     correlation_results_notes = {}
     for factor in factor_list_notes:
-        rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
-        correlation_results_notes[factor] = rho
-    correlation_results_notes = {k: v for k, v in correlation_results_notes.items() if v is not None}
+        rho, p_value = weighted_partial_correlation(
+            rows=rows,
+            factor=factor,
+            result="Sleep Quality",
+            control_columns=control_columns,
+        )
+        correlation_results_notes[factor] = (rho, p_value)
+    correlation_results_notes = {
+        k: v for k, v in correlation_results_notes.items() if v is not None
+    }
 
-    # weather
+    # wather
     correlation_results_weather = {}
     for factor in factor_list_weather:
-        rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
-        correlation_results_weather[factor] = rho
-    correlation_results_weather = {k: v for k, v in correlation_results_weather.items() if v is not None}
+        rho, p_value = weighted_partial_correlation(
+            rows=rows,
+            factor=factor,
+            result="Sleep Quality",
+            control_columns=control_columns,
+        )
+        correlation_results_weather[factor] = (rho, p_value)
+    correlation_results_weather = {
+        k: v for k, v in correlation_results_weather.items() if v is not None
+    }
 
     # cities
     correlation_results_cities = {}
     for factor in factor_list_cities:
-        rho = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
-        correlation_results_cities[factor] = rho
-    correlation_results_cities = {k: v for k, v in correlation_results_cities.items() if v is not None}
+        rho, p_value = weighted_partial_correlation(
+            rows=rows,
+            factor=factor,
+            result="Sleep Quality",
+            control_columns=control_columns,
+        )
+        correlation_results_cities[factor] = (rho, p_value)
+    correlation_results_cities = {
+        k: v for k, v in correlation_results_cities.items() if v is not None
+    }
 
-    sleep_quality = np.array([row["Sleep Quality"] for row in rows if row["Sleep Quality"] is not None])
+    sleep_quality = np.array(
+        [row["Sleep Quality"] for row in rows if row["Sleep Quality"] is not None]
+    )
     sigma_Y = np.std(sleep_quality, ddof=1) if len(sleep_quality) > 1 else 0
 
     expected_effects_notes = {}
-    for factor, r in correlation_results_notes.items():
-        factor_values = np.array([row[factor] for row in rows if row[factor] is not None])
+    for factor, (r, p_value) in correlation_results_notes.items():
+        factor_values = np.array(
+            [row[factor] for row in rows if row[factor] is not None]
+        )
         p = np.mean(factor_values) if len(factor_values) > 0 else 0
         if p in (0, 1):
-            expected_effects_notes[factor] = 0
+            expected_effects_notes[factor] = (0, p_value)
         else:
             delta = r * sigma_Y / np.sqrt(p * (1 - p))
-            expected_effects_notes[factor] = delta
-    expected_effects_notes = sorted(expected_effects_notes.items(), key=lambda item: item[1], reverse=True)
+            expected_effects_notes[factor] = (delta, p_value)
+    expected_effects_notes = sorted(
+        expected_effects_notes.items(), key=lambda item: item[1][0], reverse=True
+    )
 
     lines = []
     lines.append("Expected effects of weekdays:")
-    for weekday in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+    for weekday in [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]:
         factor = f"Weekday {weekday}"
-        factor_values = np.array([row[factor] for row in rows if row.get(factor) is not None], dtype=float)
+        factor_values = np.array(
+            [row[factor] for row in rows if row.get(factor) is not None], dtype=float
+        )
         if len(factor_values) == 0:
             effect = 0.0
         else:
@@ -1233,64 +1903,98 @@ def run_analysis_prints(rows):
             if p in (0.0, 1.0):
                 effect = 0.0
             else:
-                corr = weighted_partial_correlation(rows=rows, factor=factor, result="Sleep Quality", control_columns=control_columns)
-                effect = 0.0 if corr is None else corr * sigma_Y / np.sqrt(p * (1.0 - p))
-        lines.append(f"{weekday} -> {int(effect.round()):+} %")
+                corr_result = weighted_partial_correlation(
+                    rows=rows,
+                    factor=factor,
+                    result="Sleep Quality",
+                    control_columns=control_columns,
+                )
+
+                if corr_result is None:
+                    effect = 0.0
+                    p_value = None
+                else:
+                    rho, p_value = corr_result
+
+                    effect = (
+                        0.0
+                        if corr_result[0] is None
+                        else corr_result[0] * sigma_Y / np.sqrt(p * (1.0 - p))
+                    )
+        lines.append(f"{weekday} -> {int(effect.round()):+} % (p = {p_value:.4f})")
 
     lines.append("\nExpected effects of Notes:")
-    for key, value in expected_effects_notes:
-        lines.append(f"{key} -> {int(value.round()):+} %")
+    for key, (effect, p_value) in expected_effects_notes:
+        lines.append(f"{key} -> {int(effect.round()):+} % (p = {p_value:.4f})")
 
-    # wather
+    # weather
     expected_effects_weather = {}
-    for factor, r in correlation_results_weather.items():
-        factor_values = np.array([row[factor] for row in rows if row[factor] is not None])
+    for factor, (r, p_value) in correlation_results_weather.items():
+        factor_values = np.array(
+            [row[factor] for row in rows if row[factor] is not None]
+        )
         p = np.mean(factor_values) if len(factor_values) > 0 else 0
         if p in (0, 1):
             expected_effects_weather[factor] = 0
         else:
             delta = r * sigma_Y / np.sqrt(p * (1 - p))
-            expected_effects_weather[factor] = delta
-    expected_effects_weather = sorted(expected_effects_weather.items(), key=lambda item: item[1], reverse=True)
+            expected_effects_weather[factor] = (delta, p_value)
+    expected_effects_weather = sorted(
+        expected_effects_weather.items(), key=lambda item: item[1][0], reverse=True
+    )
 
     lines.append("\nExpected effects of Weather types:")
-    for key, value in expected_effects_weather:
-        lines.append(f"{key} -> {int(value.round()):+} %")
+    for key, (effect, p_value) in expected_effects_weather:
+        lines.append(f"{key} -> {int(effect.round()):+} % (p = {p_value:.4f})")
 
     # cities
     expected_effects_cities = {}
-    for factor, r in correlation_results_cities.items():
-        factor_values = np.array([row[factor] for row in rows if row[factor] is not None])
+    for factor, (r, p_value) in correlation_results_cities.items():
+        factor_values = np.array(
+            [row[factor] for row in rows if row[factor] is not None]
+        )
         p = np.mean(factor_values) if len(factor_values) > 0 else 0
         if p in (0, 1):
             expected_effects_cities[factor] = 0
         else:
             delta = r * sigma_Y / np.sqrt(p * (1 - p))
-            expected_effects_cities[factor] = delta
-    expected_effects_cities = sorted(expected_effects_cities.items(), key=lambda item: item[1], reverse=True)
+            expected_effects_cities[factor] = (delta, p_value)
+    expected_effects_cities = sorted(
+        expected_effects_cities.items(), key=lambda item: item[1][0], reverse=True
+    )
 
     lines.append("\nExpected effects of Cities:")
-    for key, value in expected_effects_cities:
-        lines.append(f"{key} -> {int(value.round()):+} %")
+    for key, (effect, p_value) in expected_effects_cities:
+        lines.append(f"{key} -> {int(effect.round()):+} % (p = {p_value:.4f})")
 
     # Compute top sleep goals (bedtime, alarm, time in bed)
     best_goals = compute_best_sleep_goal(rows, top_n=TOP_N_SLEEP_GOAL_CADIDATES)
     if best_goals:
-        lines.append(f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (maximize expected sleep quality):")
+        lines.append(
+            f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (maximize expected sleep quality):"
+        )
         for index, best in enumerate(best_goals, start=1):
-            lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best['bedtime'])}")
+            lines.append(
+                f"{index}. Bedtime: {format_seconds_to_24h_label(best['bedtime'])}"
+            )
             lines.append(f"   Alarm: {format_seconds_to_24h_label(best['alarm_time'])}")
-            tib_h = int(best['time_in_bed_hours'])
-            tib_min = int(round((best['time_in_bed_hours'] - tib_h) * 60))
+            tib_h = int(best["time_in_bed_hours"])
+            tib_min = int(round((best["time_in_bed_hours"] - tib_h) * 60))
             # Avoid showing 60 minutes (e.g., 11h 60m) — carry into hours
             if tib_min >= 60:
                 tib_h += tib_min // 60
                 tib_min = tib_min % 60
             lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
-            lines.append(f"   Predicted sleep quality: {best['predicted_quality']:.2f} %")
+            lines.append(
+                f"   Predicted sleep quality: {best['predicted_quality']:.2f} %"
+            )
 
     # Compute constrained sleep goals if any fixed parameters are set
-    if FIXED_BEDTIME is not None or FIXED_ALARM_TIME is not None or FIXED_TIME_IN_BED_HOURS is not None:
+    if (
+        FIXED_BEDTIME is not None
+        or FIXED_ALARM_TIME is not None
+        or FIXED_TIME_IN_BED_HOURS is not None
+    ):
         best_constrained_goals = compute_best_sleep_goal(
             rows,
             fixed_bedtime=FIXED_BEDTIME,
@@ -1299,45 +2003,67 @@ def run_analysis_prints(rows):
             top_n=TOP_N_SLEEP_GOAL_CADIDATES,
         )
         if best_constrained_goals:
-            lines.append(f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (with constraints):")
+            lines.append(
+                f"\nTop {TOP_N_SLEEP_GOAL_CADIDATES} sleep goals (with constraints):"
+            )
             for index, best_constrained in enumerate(best_constrained_goals, start=1):
                 # Format bedtime with constraint info
                 bedtime_min, bedtime_max = parse_time_range(FIXED_BEDTIME)
                 if FIXED_BEDTIME is not None:
                     if bedtime_min == bedtime_max:
-                        lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (fixed to {format_seconds_to_24h_label(bedtime_min)})")
+                        lines.append(
+                            f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (fixed to {format_seconds_to_24h_label(bedtime_min)})"
+                        )
                     else:
-                        lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (range {format_seconds_to_24h_label(bedtime_min)} - {format_seconds_to_24h_label(bedtime_max)})")
+                        lines.append(
+                            f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])} (range {format_seconds_to_24h_label(bedtime_min)} - {format_seconds_to_24h_label(bedtime_max)})"
+                        )
                 else:
-                    lines.append(f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])}")
-                
+                    lines.append(
+                        f"{index}. Bedtime: {format_seconds_to_24h_label(best_constrained['bedtime'])}"
+                    )
+
                 # Format alarm with constraint info
                 alarm_min, alarm_max = parse_time_range(FIXED_ALARM_TIME)
                 if FIXED_ALARM_TIME is not None:
                     if alarm_min == alarm_max:
-                        lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (fixed to {format_seconds_to_24h_label(alarm_min)})")
+                        lines.append(
+                            f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (fixed to {format_seconds_to_24h_label(alarm_min)})"
+                        )
                     else:
-                        lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (range {format_seconds_to_24h_label(alarm_min)} - {format_seconds_to_24h_label(alarm_max)})")
+                        lines.append(
+                            f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])} (range {format_seconds_to_24h_label(alarm_min)} - {format_seconds_to_24h_label(alarm_max)})"
+                        )
                 else:
-                    lines.append(f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])}")
-                
+                    lines.append(
+                        f"   Alarm: {format_seconds_to_24h_label(best_constrained['alarm_time'])}"
+                    )
+
                 # Format time in bed with constraint info
-                tib_h = int(best_constrained['time_in_bed_hours'])
-                tib_min = int(round((best_constrained['time_in_bed_hours'] - tib_h) * 60))
+                tib_h = int(best_constrained["time_in_bed_hours"])
+                tib_min = int(
+                    round((best_constrained["time_in_bed_hours"] - tib_h) * 60)
+                )
                 if tib_min >= 60:
                     tib_h += tib_min // 60
                     tib_min = tib_min % 60
-                
+
                 tib_min_fixed, tib_max_fixed = parse_tib_range(FIXED_TIME_IN_BED_HOURS)
                 if FIXED_TIME_IN_BED_HOURS is not None:
                     if tib_min_fixed == tib_max_fixed:
-                        lines.append(f"   Time in bed: {tib_h}h {tib_min}m (fixed to {tib_min_fixed:.1f}h)")
+                        lines.append(
+                            f"   Time in bed: {tib_h}h {tib_min}m (fixed to {tib_min_fixed:.1f}h)"
+                        )
                     else:
-                        lines.append(f"   Time in bed: {tib_h}h {tib_min}m (range {tib_min_fixed:.1f}h - {tib_max_fixed:.1f}h)")
+                        lines.append(
+                            f"   Time in bed: {tib_h}h {tib_min}m (range {tib_min_fixed:.1f}h - {tib_max_fixed:.1f}h)"
+                        )
                 else:
                     lines.append(f"   Time in bed: {tib_h}h {tib_min}m")
-                
-                lines.append(f"   Predicted sleep quality: {best_constrained['predicted_quality']:.2f} %")
+
+                lines.append(
+                    f"   Predicted sleep quality: {best_constrained['predicted_quality']:.2f} %"
+                )
 
     text_path = save_text("output.txt", "\n".join(lines) + "\n")
     print(f"Saved output to {text_path}")
@@ -1345,14 +2071,40 @@ def run_analysis_prints(rows):
     plot_alarm_time(rows)
 
     data = [
-        [r["Sleep Quality"] for r in rows if r["Alarm set"] == 0 and r["Sleep Quality"] is not None],
-        [r["Sleep Quality"] for r in rows if r["Alarm set"] == 1 and r["Sleep Quality"] is not None],
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Alarm set"] == 0 and r["Sleep Quality"] is not None
+        ],
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Alarm set"] == 1 and r["Sleep Quality"] is not None
+        ],
     ]
     weights = [
-        [r["Weight"] for r in rows if r["Alarm set"] == 0 and r["Sleep Quality"] is not None and r["Weight"] is not None],
-        [r["Weight"] for r in rows if r["Alarm set"] == 1 and r["Sleep Quality"] is not None and r["Weight"] is not None],
+        [
+            r["Weight"]
+            for r in rows
+            if r["Alarm set"] == 0
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        [
+            r["Weight"]
+            for r in rows
+            if r["Alarm set"] == 1
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
     ]
-    plot_weighted_boxplot(data, weights, ["No alarm", "Alarm set"], "Sleep quality", "Sleep quality vs alarm set")
+    plot_weighted_boxplot(
+        data,
+        weights,
+        ["No alarm", "Alarm set"],
+        "Sleep quality",
+        "Sleep quality vs alarm set",
+    )
 
 
 if __name__ == "__main__":
