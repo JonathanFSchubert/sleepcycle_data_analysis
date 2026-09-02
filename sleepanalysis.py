@@ -1,5 +1,6 @@
 """
 Parts of this code were written with help from LLMs.
+tested and changed by me; i think :)
 """
 
 import csv
@@ -47,7 +48,12 @@ GLOBAL_BIAS_DEFAULT = 0.15  # baseline weight when combining predictions -> Incr
 BASELINE_PERCENTILE = 25  # percentile used as conservative baseline
 
 # Half-life for weighting older data points (in days) when computing weighted correlations and predictions
-HALF_LIFE_DAYS = 365 * 2
+HALF_LIFE_DAYS = (
+    365 * 2
+)  # None for no decay (recommended MINIMUM: 30; recommended range: 365 to 365*10)
+
+# default is ["Alarm_quality_prediction", "Alarm set"] ; set to [] for no control columns in correlation calculations
+CONTROL_COLUMNS = ["Alarm_quality_prediction", "Alarm set"]
 
 
 def yyyy_time_to_datetime(string):
@@ -175,10 +181,6 @@ def effective_sample_size(weights):
     return (w.sum() ** 2) / (np.sum(w**2))
 
 
-def shrink_correlation(corr, n_eff):
-    return corr * (n_eff / (n_eff + 1))
-
-
 def weighted_mean(values, weights):
     values = np.asarray(values, dtype=float)
     weights = np.asarray(weights, dtype=float)
@@ -187,33 +189,16 @@ def weighted_mean(values, weights):
 
 def weighted_partial_correlation(rows, factor, result, control_columns):
     """
-    returns correlation value and p value
-    """
-    first_appearance_index = find_first_appearance_of_factor(rows, factor)
-    if first_appearance_index is None:
-        print("Error: factor never appears!")
-        return
-
-    rows_relevant = rows
-    """
-    only uses rows after the user started using this note
-
-    rows_relevant = rows[first_appearance_index:]
-    """
-
-    """
-    only uses rows where at leat one notes was set. i though maiby it is good to remove rows where the user just didnt bother to use notes...
-    not shure if this good.
-
-    if factor.startswith("Note "):
-        rows_relevant = [row for row in rows_relevant if len(row["Notes"]) > 0]
+    returns correlation value and p value.
+    behaves like normal ordinary correlation when used without control columns and weight decay is None.
+    uses weighted ordinary least squares
     """
 
     control_means = {}
     for c in control_columns:
         vals = []
         ws = []
-        for r in rows_relevant:
+        for r in rows:
             v = r[c]
             w = r["Weight"]
             if v is not None and w is not None:
@@ -226,7 +211,7 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
             control_means[c] = weighted_mean(vals, ws)
 
     data = []
-    for r in rows_relevant:
+    for r in rows:
         x = r[factor]
         y = r[result]
         w = r["Weight"]
@@ -235,68 +220,78 @@ def weighted_partial_correlation(rows, factor, result, control_columns):
             continue
 
         controls = []
+        valid = True
         for c in control_columns:
             v = r[c]
             if v is None:
-                print("Error with v = None")
-                v = control_means[c]
-            if v is None:
-                print("even the fallback didnt work..")
+                valid = False
+                print("Error with v is None")
                 break
             controls.append(v)
 
-        if len(controls) != len(control_columns):
+        if not valid:
             continue
 
         data.append((x, y, controls, w))
 
-    X_var = np.array([d[0] for d in data], dtype=float)
-    Y_var = np.array([d[1] for d in data], dtype=float)
-    Controls = np.array([d[2] for d in data], dtype=float)
-    weight = np.array([d[3] for d in data], dtype=float)
+    if len(data) < 2:
+        print("Error: not enough data points for correlation")
+        return None
 
-    Controls_const = sm.add_constant(Controls)
-    sw = np.sqrt(weight)
-    Xw = Controls_const * sw[:, None]
-    X_var_w = X_var * sw
-    Y_var_w = Y_var * sw
+    X = np.asarray([d[0] for d in data], dtype=float)
+    Y = np.asarray([d[1] for d in data], dtype=float)
+    W = np.asarray([d[3] for d in data], dtype=float)
 
-    n_obs = len(X_var)
+    if np.any(W <= 0.0):
+        print("How Did We Get Here?")
+
+    Controls = np.asarray([d[2] for d in data], dtype=float)
+
+    # Make sure zero controls is represented as an (n, 0) matrix.
+    if len(control_columns) == 0:
+        Controls = np.empty((len(data), 0))
+
+    Controls_const = sm.add_constant(Controls, has_constant="add")
+
+    n_obs = len(X)
     n_params = Controls_const.shape[1]
+
     if n_obs <= n_params:
-        print(
-            f"Error: not enough degrees of freedom for robust regression "
-            f"(n_obs={n_obs}, n_params={n_params}) for factor {factor}"
-        )
         return None
 
-    res_x = sm.RLM(X_var_w, Xw, M=sm.robust.norms.HuberT()).fit().resid
-    res_y = sm.RLM(Y_var_w, Xw, M=sm.robust.norms.HuberT()).fit().resid
+    model_x = sm.WLS(X, Controls_const, weights=W).fit()
 
-    wsum = np.sum(weight)
-    mx = np.sum(weight * res_x) / wsum
-    my = np.sum(weight * res_y) / wsum
+    model_y = sm.WLS(Y, Controls_const, weights=W).fit()
 
-    num = np.sum(weight * (res_x - mx) * (res_y - my))
-    den = np.sqrt(
-        np.sum(weight * (res_x - mx) ** 2) * np.sum(weight * (res_y - my) ** 2)
-    )
+    rx = model_x.resid
+    ry = model_y.resid
+
+    # WLS with an intercept already makes these approximately zero,
+    # but explicitly centering is harmless.
+    rx -= np.average(rx, weights=W)
+    ry -= np.average(ry, weights=W)
+
+    num = np.sum(W * rx * ry)
+    den = np.sqrt(np.sum(W * rx**2) * np.sum(W * ry**2))
+
     if den == 0:
-        print(f"Error: denominator is 0 for Factor {factor}")
         return None
 
-    correlation_value = num / den
-    n_eff = effective_sample_size(weight)
+    r = num / den
 
-    # calculate partial correlation p value
+    # approximate p-value
+    n_eff = effective_sample_size(W)
     k = len(control_columns)
+
     df = n_eff - k - 2
-    if df <= 0 or abs(correlation_value) >= 1:
+
+    if df <= 0 or abs(r) >= 1:
         return None
-    t = correlation_value * np.sqrt(df / (1 - correlation_value**2))
+
+    t = r * np.sqrt(df / (1 - r**2))
     p = 2 * stats.t.sf(abs(t), df)
 
-    return float(shrink_correlation(correlation_value, n_eff)), p
+    return float(r), float(p)
 
 
 def ensure_output_dir():
@@ -355,7 +350,7 @@ def kernel_predict(x_query, x_vals, y_vals, weights, bandwidth):
     kernel = np.exp(-0.5 * (dists / bandwidth) ** 2)
     w = kernel * weights
 
-    if w.sum() == 0:
+    if w.sum() == 0.0:
         print("Error with w.sum() == 0 in kernel_predict")
         return np.nan
 
@@ -377,7 +372,7 @@ def kernel_predict_circular(x_query, x_vals, y_vals, weights, bandwidth, period=
     dists = circular_time_distance(x_vals, x_query, period)
     kernel = np.exp(-0.5 * (dists / bandwidth) ** 2)
     w = kernel * weights
-    if w.sum() == 0:
+    if w.sum() == 0.0:
         return np.nan
     return np.sum(w * y_vals) / np.sum(w)
 
@@ -1288,13 +1283,25 @@ def load_rows():
         else:
             row["Age (days)"] = None
 
-    LAMBDA = math.log(2) / HALF_LIFE_DAYS
+    # HALF LIFE WEIGHT CALCULATION
+    if HALF_LIFE_DAYS is None:
+        for row in rows:
+            row["Weight"] = 1.0
+    elif HALF_LIFE_DAYS <= 0:
+        print(
+            "Warning: HALF_LIFE_DAYS must be positive. Using weight=1.0 for all rows."
+        )
+        for row in rows:
+            row["Weight"] = 1.0
+    else:
+        LAMBDA = math.log(2) / HALF_LIFE_DAYS
 
-    for row in rows:
-        if row["Age (days)"] is None:
-            row["Weight"] = None
-        else:
-            row["Weight"] = math.exp(-LAMBDA * row["Age (days)"])
+        for row in rows:
+            if row["Age (days)"] is None:
+                print("Warning: Age (days) is None for a row. Setting weight to None.")
+                row["Weight"] = None
+            else:
+                row["Weight"] = math.exp(-LAMBDA * row["Age (days)"])
 
     for row in rows:
         if row["Woke up"] is not None:
@@ -1817,8 +1824,6 @@ def run_analysis_prints(rows):
     ]
     factor_list_cities = [f"City {city}" for city in unique_cities]
 
-    control_columns = ["Alarm_quality_prediction", "Alarm set"]
-
     # notes
     correlation_results_notes = {}
     for factor in factor_list_notes:
@@ -1826,21 +1831,21 @@ def run_analysis_prints(rows):
             rows=rows,
             factor=factor,
             result="Sleep Quality",
-            control_columns=control_columns,
+            control_columns=CONTROL_COLUMNS,
         )
         correlation_results_notes[factor] = (rho, p_value)
     correlation_results_notes = {
         k: v for k, v in correlation_results_notes.items() if v is not None
     }
 
-    # wather
+    # weather
     correlation_results_weather = {}
     for factor in factor_list_weather:
         rho, p_value = weighted_partial_correlation(
             rows=rows,
             factor=factor,
             result="Sleep Quality",
-            control_columns=control_columns,
+            control_columns=CONTROL_COLUMNS,
         )
         correlation_results_weather[factor] = (rho, p_value)
     correlation_results_weather = {
@@ -1854,7 +1859,7 @@ def run_analysis_prints(rows):
             rows=rows,
             factor=factor,
             result="Sleep Quality",
-            control_columns=control_columns,
+            control_columns=CONTROL_COLUMNS,
         )
         correlation_results_cities[factor] = (rho, p_value)
     correlation_results_cities = {
@@ -1907,7 +1912,7 @@ def run_analysis_prints(rows):
                     rows=rows,
                     factor=factor,
                     result="Sleep Quality",
-                    control_columns=control_columns,
+                    control_columns=CONTROL_COLUMNS,
                 )
 
                 if corr_result is None:
