@@ -1301,7 +1301,12 @@ def load_rows():
                 print("Warning: Age (days) is None for a row. Setting weight to None.")
                 row["Weight"] = None
             else:
-                row["Weight"] = math.exp(-LAMBDA * row["Age (days)"])
+                weight_temp = math.exp(-LAMBDA * row["Age (days)"])
+                row["Weight"] = weight_temp
+                if (weight_temp) == 0.0:
+                    print(
+                        f"Error with weight 0 for the day {row["Went to bed"]}. this may be a bug in the export from Sleepcycle; you may want to increase HALF_LIFE_DAYS."
+                    )
 
     for row in rows:
         if row["Woke up"] is not None:
