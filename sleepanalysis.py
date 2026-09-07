@@ -13,6 +13,7 @@ import matplotlib.ticker as ticker
 import numpy as np
 import statsmodels.api as sm
 from scipy import stats
+import changepoint as chp
 
 # Optional fixed sleep goal parameters (set to None to optimize, or provide a specific value/range)
 # For bedtime/alarm: time string like "22:30" (fixed) or "22:00 - 23:00" (range) or seconds (0-86400)
@@ -54,6 +55,11 @@ HALF_LIFE_DAYS = (
 
 # default is ["Alarm_quality_prediction", "Alarm set"] ; set to [] for no control columns in correlation calculations
 CONTROL_COLUMNS = ["Alarm_quality_prediction", "Alarm set"]
+
+# changepoint parameter
+# expected average distance between changes
+# smaller -> more willing to detect frequent changes
+CHANGEPOINT_EXPECTED_RUN_LENGTH = 2
 
 
 def yyyy_time_to_datetime(string):
@@ -1319,6 +1325,11 @@ def load_rows():
         else:
             row["Moon phase"] = None
 
+        if row.get("Woke up") is not None:
+            row["Sleep date"] = row["Woke up"].date()
+        else:
+            row["Sleep date"] = None
+
         if row["Went to bed"] is not None and row["Woke up"] is not None:
             if row["Went to bed"].date() == (row["Woke up"] - timedelta(days=1)).date():
                 row["Went to bed"] = seconds_since_midnight(row["Went to bed"])
@@ -1359,6 +1370,62 @@ def load_rows():
             row[f"City {city}"] = 1 if row["City"] == city else 0
         for weekday in weekday_names:
             row[f"Weekday {weekday}"] = 1 if row.get("Weekday") == weekday else 0
+
+    day_seconds = 86400
+
+    def circ_dist(a, b):
+        d = abs(a - b)
+        return min(d, day_seconds - d)
+
+    alarm_times = []
+    alarm_quality = []
+    alarm_weights = []
+    for row in rows:
+        alarm_time = row["Wake up window stop"]
+        quality = row["Sleep Quality"]
+        weight = row["Weight"]
+        if alarm_time is not None and quality is not None and weight is not None:
+            alarm_times.append(alarm_time)
+            alarm_quality.append(quality)
+            alarm_weights.append(weight)
+
+    alarm_times = np.array(alarm_times, dtype=float)
+    alarm_quality = np.array(alarm_quality, dtype=float)
+    alarm_weights = np.array(alarm_weights, dtype=float)
+
+    def predict_alarm_quality(alarm_time):
+        distances = np.array([circ_dist(alarm_time, value) for value in alarm_times])
+        kernel = np.exp(-0.5 * (distances / BANDWIDTH_ALARM) ** 2)
+        weighted = kernel * alarm_weights
+        if weighted.sum() == 0:
+            return None
+        return np.sum(weighted * alarm_quality) / weighted.sum()
+
+    no_alarm_values = [
+        row["Sleep Quality"] * row["Weight"]
+        for row in rows
+        if row["Wake up window stop"] is None
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    no_alarm_weights = [
+        row["Weight"]
+        for row in rows
+        if row["Wake up window stop"] is None
+        and row["Sleep Quality"] is not None
+        and row["Weight"] is not None
+    ]
+    if no_alarm_values:
+        no_alarm_mean = sum(no_alarm_values) / sum(no_alarm_weights)
+    else:
+        no_alarm_mean = np.mean(alarm_quality) if len(alarm_quality) > 0 else 0
+
+    for row in rows:
+        alarm_time = row["Wake up window stop"]
+        row["Alarm set"] = 0 if alarm_time is None else 1
+        row["Alarm_quality_prediction"] = (
+            no_alarm_mean if alarm_time is None else predict_alarm_quality(alarm_time)
+        )
 
     return rows
 
@@ -1742,71 +1809,127 @@ def plot_all(rows):
         )
     )
 
+    data = [
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Alarm set"] == 0 and r["Sleep Quality"] is not None
+        ],
+        [
+            r["Sleep Quality"]
+            for r in rows
+            if r["Alarm set"] == 1 and r["Sleep Quality"] is not None
+        ],
+    ]
+    weights = [
+        [
+            r["Weight"]
+            for r in rows
+            if r["Alarm set"] == 0
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+        [
+            r["Weight"]
+            for r in rows
+            if r["Alarm set"] == 1
+            and r["Sleep Quality"] is not None
+            and r["Weight"] is not None
+        ],
+    ]
+    plots.append(
+        plot_weighted_boxplot(
+            data,
+            weights,
+            ["No alarm", "Alarm set"],
+            "Sleep quality",
+            "Sleep quality vs alarm set",
+        )
+    )
+
+    plots.append(plot_sleep_quality_change_points(rows))
+
     return plots
 
 
+def plot_sleep_quality_change_points(rows):
+    data = [
+        (row["Sleep date"], float(row["Sleep Quality"]))
+        for row in rows
+        if row.get("Sleep date") is not None and row.get("Sleep Quality") is not None
+    ]
+
+    if len(data) < 20:
+        return None
+
+    data.sort(key=lambda x: x[0])
+
+    dates = [x[0] for x in data]
+    values = np.asarray([x[1] for x in data], dtype=float)
+
+    # Bayesian Online Change Point Detection
+    cpd = chp.Bocpd(
+        prior=chp.NormalGamma(),
+        lam=CHANGEPOINT_EXPECTED_RUN_LENGTH,
+    )
+
+    history = np.zeros((len(values), len(values)))
+
+    for i, value in enumerate(values):
+        history[i, : i + 1] = cpd.step(value)
+
+    change_probabilities = np.asarray(
+        chp.infer_changepoints(
+            history,
+            sample_size=10000,
+        )
+    )
+
+    change_probabilities = np.clip(
+        change_probabilities,
+        0,
+        1,
+    )
+
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(FIG_SIZE, FIG_SIZE),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2, 1]},
+    )
+
+    # Sleep Quality
+    ax1.plot(
+        dates,
+        values,
+        marker=".",
+        linewidth=1,
+        alpha=0.6,
+    )
+
+    ax1.set_ylabel("Sleep Quality")
+    ax1.set_title("Sleep Quality and Bayesian Change-Point Probability")
+    ax1.grid(alpha=0.25)
+
+    # Change probability
+    ax2.plot(
+        dates,
+        change_probabilities * 100,
+        linewidth=1.5,
+    )
+
+    ax2.set_ylabel("P(change point) (%)")
+    ax2.set_xlabel("Sleep date")
+    ax2.set_ylim(0, 100)
+    ax2.grid(alpha=0.25)
+
+    plt.tight_layout()
+
+    return save_plot("Sleep Quality Change Points")
+
+
 def run_analysis_prints(rows):
-    DAY_SECONDS = 86400
-
-    # Build alarm prediction columns for use in partial correlation controls
-    def circ_dist(a, b):
-        d = abs(a - b)
-        return min(d, DAY_SECONDS - d)
-
-    alarm_times = []
-    alarm_quality = []
-    alarm_weights = []
-    for r in rows:
-        t = r["Wake up window stop"]
-        q = r["Sleep Quality"]
-        w = r["Weight"]
-        if t is not None and q is not None and w is not None:
-            alarm_times.append(t)
-            alarm_quality.append(q)
-            alarm_weights.append(w)
-
-    alarm_times = np.array(alarm_times, dtype=float)
-    alarm_quality = np.array(alarm_quality, dtype=float)
-    alarm_weights = np.array(alarm_weights, dtype=float)
-
-    def predict_alarm_quality(t_query, exclude_index=None):
-        dists = np.array([circ_dist(t_query, t) for t in alarm_times])
-        kernel = np.exp(-0.5 * (dists / BANDWIDTH_ALARM) ** 2)
-        w = kernel * alarm_weights
-        if exclude_index is not None:
-            w[exclude_index] = 0
-        if w.sum() == 0:
-            return None
-        return np.sum(w * alarm_quality) / np.sum(w)
-
-    no_alarm_vals = [
-        r["Sleep Quality"] * r["Weight"]
-        for r in rows
-        if r["Wake up window stop"] is None
-        and r["Sleep Quality"] is not None
-        and r["Weight"] is not None
-    ]
-    no_alarm_w = [
-        r["Weight"]
-        for r in rows
-        if r["Wake up window stop"] is None
-        and r["Sleep Quality"] is not None
-        and r["Weight"] is not None
-    ]
-    if len(no_alarm_vals) > 0:
-        no_alarm_mean = sum(no_alarm_vals) / sum(no_alarm_w)
-    else:
-        no_alarm_mean = np.mean(alarm_quality) if len(alarm_quality) > 0 else 0
-
-    for i, r in enumerate(rows):
-        t = r["Wake up window stop"]
-        if t is None:
-            r["Alarm set"] = 0
-            r["Alarm_quality_prediction"] = no_alarm_mean
-        else:
-            r["Alarm set"] = 1
-            r["Alarm_quality_prediction"] = predict_alarm_quality(t)
-
     factor_list = [
         "Went to bed",
         "Time in bed (seconds)",
@@ -2077,44 +2200,6 @@ def run_analysis_prints(rows):
 
     text_path = save_text("output.txt", "\n".join(lines) + "\n")
     print(f"Saved output to {text_path}")
-
-    plot_alarm_time(rows)
-
-    data = [
-        [
-            r["Sleep Quality"]
-            for r in rows
-            if r["Alarm set"] == 0 and r["Sleep Quality"] is not None
-        ],
-        [
-            r["Sleep Quality"]
-            for r in rows
-            if r["Alarm set"] == 1 and r["Sleep Quality"] is not None
-        ],
-    ]
-    weights = [
-        [
-            r["Weight"]
-            for r in rows
-            if r["Alarm set"] == 0
-            and r["Sleep Quality"] is not None
-            and r["Weight"] is not None
-        ],
-        [
-            r["Weight"]
-            for r in rows
-            if r["Alarm set"] == 1
-            and r["Sleep Quality"] is not None
-            and r["Weight"] is not None
-        ],
-    ]
-    plot_weighted_boxplot(
-        data,
-        weights,
-        ["No alarm", "Alarm set"],
-        "Sleep quality",
-        "Sleep quality vs alarm set",
-    )
 
 
 if __name__ == "__main__":
