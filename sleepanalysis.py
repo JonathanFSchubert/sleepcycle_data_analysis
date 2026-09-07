@@ -1891,16 +1891,10 @@ def plot_sleep_quality_change_points(rows):
         1,
     )
 
-    fig, (ax1, ax2) = plt.subplots(
-        2,
-        1,
-        figsize=(FIG_SIZE, FIG_SIZE),
-        sharex=True,
-        gridspec_kw={"height_ratios": [2, 1]},
-    )
+    fig, ax = plt.subplots(figsize=(FIG_SIZE, FIG_SIZE))
 
     # Sleep Quality
-    ax1.plot(
+    ax.plot(
         dates,
         values,
         marker=".",
@@ -1908,21 +1902,32 @@ def plot_sleep_quality_change_points(rows):
         alpha=0.6,
     )
 
-    ax1.set_ylabel("Sleep Quality")
-    ax1.set_title("Sleep Quality and Bayesian Change-Point Probability")
-    ax1.grid(alpha=0.25)
+    ax.set_ylabel("Sleep Quality / Change-Point Probability (%)")
+    ax.set_title("Sleep Quality and Bayesian Change-Point Probability")
+    ax.grid(alpha=0.25)
 
     # Change probability
-    ax2.plot(
+    ax.plot(
         dates,
         change_probabilities * 100,
+        color="red",
         linewidth=1.5,
     )
 
-    ax2.set_ylabel("P(change point) (%)")
-    ax2.set_xlabel("Sleep date")
-    ax2.set_ylim(0, 100)
-    ax2.grid(alpha=0.25)
+    for date, probability in zip(dates, change_probabilities):
+        if probability >= 0.1:
+            ax.annotate(
+                f"{date:%Y-%m-%d}\n{probability:.0%}",
+                (date, probability * 100),
+                xytext=(0, 5),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
+
+    ax.set_xlabel("Sleep date")
+    ax.set_ylim(0, 100)
 
     plt.tight_layout()
 
